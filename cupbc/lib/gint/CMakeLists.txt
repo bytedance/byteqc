@@ -22,10 +22,7 @@
 #     Author: Hong-Zhou Ye <hzyechem@gmail.com>
 #
 
-#set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_30 -rdc=true")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS}")
-#set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_80 --ptxas-options=-v")
-#set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_50 --ptxas-options=-v -maxrregcount=255")
 
 add_library(gint SHARED
   nr_fill_ao_ints.cu

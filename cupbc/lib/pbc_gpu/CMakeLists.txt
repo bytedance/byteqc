@@ -21,12 +21,7 @@
 #     Author: Qiming Sun <osirpt.sun@gmail.com>
 #
 
-#set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_30 -rdc=true")
-# set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_80 -Xcompiler -fopenmp -maxrregcount=255")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -std=c++17")
-#set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS}; -lcublas -lnvToolsExt -std=c++11 -lcutensor;")
-#set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_80 --ptxas-options=-v")
-#set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_50 --ptxas-options=-v -maxrregcount=255")
 
 add_library(gpbc SHARED fill_ints_sr.c fill_ints_sr.cu util.cu fill_int2e.cu get_Rcuts.cu)
 # add_dependencies(gpbc cgto cvhf)

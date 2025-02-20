@@ -22,7 +22,6 @@
 #
 
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS}")
-#set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_58 --ptxas-options=-v -maxrregcount=255")
 
 add_library(gint SHARED
   g2e.c

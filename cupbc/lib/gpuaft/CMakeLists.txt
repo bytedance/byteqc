@@ -22,10 +22,7 @@
 #     Author: Hong-Zhou Ye <hzyechem@gmail.com>
 #
 
-#set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_30 -rdc=true")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler")
-#set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_80 --ptxas-options=-v")
-#set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_50 --ptxas-options=-v -maxrregcount=255")
 
 add_library(gaft SHARED ft_ao.cu ft_ao_latsum.cu ft_ao_bvk.cu ft_ao_bvk_ins1.cu ft_ao_bvk_ins2.cu ft_ao_bvk_ins3.cu ft_ao_bvk_ins4.cu ft_ao_bvk_ins5.cu ft_ao_bvk_ins6.cu ft_ao_bvk_ins7.cu ft_ao_latsum_ins1.cu ft_ao_latsum_ins2.cu ft_ao_latsum_ins3.cu ft_ao_latsum_ins4.cu ft_ao_latsum_ins5.cu ft_ao_latsum_ins6.cu ft_ao_latsum_ins7.cu ft_ao_GTO.cu)
 # add_dependencies(gaft cgto cvhf)
