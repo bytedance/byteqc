@@ -21,15 +21,15 @@
 #     Author: Qiming Sun <osirpt.sun@gmail.com>
 #
 
-cmake_minimum_required (VERSION 3.5)
-project (gpu_rsdf C CUDA)
+cmake_minimum_required (VERSION 3.9)
+project (cupbc C CUDA)
 
-set(CMAKE_C_STANDARD "99")
 if(DEFINED CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES "${CUDA_ARCHITECTURES}")
 else()
   set(CMAKE_CUDA_ARCHITECTURES native)
 endif()
+message("CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}")
 
 find_library(CUTENSOR_LIB NAMES cutensor PATHS "$ENV{CUTENSOR_ROOT}/lib/12" $ENV{LD_LIBRARY_PATH} $ENV{PATH})
 find_file(CUTENSOR_HEADER "cutensor.h" PATHS "$ENV{CUTENSOR_ROOT}/include" $ENV{C_INCLUDE_PATH} $ENV{CPLUS_INCLUDE_PATH} $ENV{PATH})
@@ -118,42 +118,11 @@ else()
   endif()
 endif()
 
-
-set(CMAKE_INCLUDE_CURRENT_DIR ON)
-
-option(ENABLE_OPENMP "Compiling C extensions with openmp" ON)
-set(OPENMP_C_PROPERTIES "")
-if(ENABLE_OPENMP)
-  find_package(OpenMP)
-  if(OPENMP_FOUND)
-    set(HAVE_OPENMP 1)
-    set(OPENMP_C_PROPERTIES OpenMP::OpenMP_C)
-  endif()
-endif()
-
 include_directories(${PROJECT_SOURCE_DIR})
-include_directories(${PROJECT_SOURCE_DIR}/deps/include)
-include_directories(${CMAKE_INSTALL_PREFIX}/include)
-link_directories(${PROJECT_SOURCE_DIR}/deps/lib ${PROJECT_SOURCE_DIR}/deps/lib64)
-link_directories(${CMAKE_INSTALL_PREFIX}/lib ${CMAKE_INSTALL_PREFIX}/lib64)
 
-# See also https://gitlab.kitware.com/cmake/community/wikis/doc/cmake/RPATH-handling
-if (APPLE)
-  set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
-  set(CMAKE_INSTALL_RPATH "@loader_path;@loader_path/deps/lib;@loader_path/deps/lib64")
-  set(CMAKE_BUILD_RPATH "@loader_path;@loader_path/deps/lib;@loader_path/deps/lib64")
-else ()
-  set(CMAKE_SKIP_BUILD_RPATH  True)
-  set(CMAKE_BUILD_WITH_INSTALL_RPATH True)
-  set(CMAKE_INSTALL_RPATH "\$ORIGIN:\$ORIGIN/deps/lib:\$ORIGIN/deps/lib64")
-endif ()
+set(C_LINK_TEMPLATE "<CMAKE_C_COMPILER> <CMAKE_SHARED_LIBRARY_C_FLAGS> <LANGUAGE_COMPILE_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES>")
+set(CXX_LINK_TEMPLATE "<CMAKE_CXX_COMPILER> <CMAKE_SHARED_LIBRARY_CXX_FLAGS> <LANGUAGE_COMPILE_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES>")
 
 add_subdirectory(gpuaft)
 add_subdirectory(pbc_gpu)
 add_subdirectory(gint)
-
-# Overwrite CMAKE_C_CREATE_SHARED_LIBRARY in Modules/CMakeCInformation.cmake
-# to remove the SONAME flag in the so file. The soname information causes
-# dynamic link error when importing libcint library.
-set(C_LINK_TEMPLATE "<CMAKE_C_COMPILER> <CMAKE_SHARED_LIBRARY_C_FLAGS> <LANGUAGE_COMPILE_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES>")
-set(CXX_LINK_TEMPLATE "<CMAKE_CXX_COMPILER> <CMAKE_SHARED_LIBRARY_CXX_FLAGS> <LANGUAGE_COMPILE_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES>")

@@ -63,20 +63,6 @@ if (BUILD_MARCH_NATIVE)
   endif()
 endif()
 
-# See also https://gitlab.kitware.com/cmake/community/wikis/doc/cmake/RPATH-handling
-if (WIN32)
-  #?
-elseif (APPLE)
-  set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
-  set(CMAKE_INSTALL_RPATH "@loader_path")
-  set(CMAKE_BUILD_RPATH "@loader_path")
-else ()
-  set(CMAKE_SKIP_BUILD_RPATH  True)
-  set(CMAKE_BUILD_WITH_INSTALL_RPATH True)
-  set(CMAKE_INSTALL_RPATH "\$ORIGIN")
-endif ()
-
-set(CMAKE_INCLUDE_CURRENT_DIR ON)
 include_directories(${PROJECT_SOURCE_DIR})
 
 set(C_LINK_TEMPLATE "<CMAKE_C_COMPILER> <CMAKE_SHARED_LIBRARY_C_FLAGS> <LANGUAGE_COMPILE_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES>")
