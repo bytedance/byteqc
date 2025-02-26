@@ -55,12 +55,23 @@ The `lib` subpackage is exported directly when importing ByteQC. The usage of ea
 ## Citations
 
 ```latex
+@Misc{Guo2025,
+  author       = {Guo, Zhen and Huang, Zigeng and Chen, Qiaorui and Shao, Jiang and Liu, Guangcheng and Pham, Hung and Cao, Changsu and Chen, Ji and Lv, Dingshun},
+  title        = {{ByteQC}: {GPU}-accelerated quantum chemistry package for large-scale systems},
+  year         = {2025},
+  doi          = {10.48550/ARXIV.2502.17963},
+  publisher    = {arXiv},
+}
+```
+
+If the SIE feature is used, please also cite:
+
+```latex
 @Misc{Huang2024,
-  author    = {Huang, Zigeng and Guo, Zhen and Cao, Changsu and Pham, Hung Q. and Wen, Xuelan and Booth, George H. and Chen, Ji and Lv, Dingshun},
-  title     = {Advancing surface chemistry with large-scale ab-initio quantum many-body simulations},
-  year      = {2024},
-  doi       = {10.48550/arXiv.2412.18553},
-  keywords  = {Materials Science (cond-mat.mtrl-sci), Chemical Physics (physics.chem-ph), FOS: Physical sciences, FOS: Physical sciences},
-  publisher = {arXiv},
+  author       = {Huang, Zigeng and Guo, Zhen and Cao, Changsu and Pham, Hung Q. and Wen, Xuelan and Booth, George H. and Chen, Ji and Lv, Dingshun},
+  title        = {Advancing surface chemistry with large-scale ab-initio quantum many-body simulations},
+  year         = {2024},
+  doi          = {10.48550/ARXIV.2412.18553},
+  publisher    = {arXiv},
 }
 ```
