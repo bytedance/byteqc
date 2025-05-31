@@ -158,8 +158,8 @@ take0010_s_t = cupy.ElementwiseKernel(
         int b = (p+p0) % nocc;
         int a = (p+p0) / nocc;
         out[m * nocc * nocc * nvir + (a*nocc+b) * nvir + c] = \
-            r[(b*nocc+a) * extb * nvir + indb[m] * nvir + c];
-    ''', 'take010_s')
+            r[(b*nocc+a) * nvir * nvir + indb[m] * nvir + c];
+    ''', 'take0010_s_t')
 
 # nocc, nvir, nocc, nocc = r.shape
 # for i in range(n):

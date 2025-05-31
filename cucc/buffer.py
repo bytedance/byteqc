@@ -250,17 +250,20 @@ class BufFile(h5py.Dataset, BufArr):
         else:
             self.cb()
 
+    def readcheck(self):
+        assert isinstance(self.arr, h5py.Dataset), \
+            "Slice of BufFile is readonly!"
+
     def __getattr__(self, k):
         return getattr(self.arr, k)
 
     def __getitem__(self, key):
-        assert isinstance(self.arr, h5py.Dataset), \
-            "getitem twice of BufFile is not allowed!"
         arr = self.arr.__getitem__(key)
         return BufFile(self.buf, arr,
                        cb=lambda: self.arr.__setitem__(key, arr))
 
     def __setitem__(self, key, val):
+        self.readcheck()
         if isinstance(val, Number):
             self.arr.__setitem__(key, val)
         else:
@@ -268,24 +271,32 @@ class BufFile(h5py.Dataset, BufArr):
         self.cb()
 
     def __iadd__(self, val):
+        self.readcheck()
         r = self._op(numpy.ndarray.__iadd__, val)
         self.cb()
         return r
 
     def __isub__(self, val):
+        self.readcheck()
         r = self._op(numpy.ndarray.__isub__, val)
         self.cb()
         return r
 
     def __imul__(self, val):
+        self.readcheck()
         r = self._op(numpy.ndarray.__imul__, val)
         self.cb()
         return r
 
     def __itruediv__(self, val):
+        self.readcheck()
         r = self._op(numpy.ndarray.__itruediv__, val)
         self.cb()
         return r
+
+    def enter(self, *arg, **kwgs):
+        self.readcheck()
+        BufArr.enter(self, *arg, **kwgs)
 
     def exit(self):
         if getattr(self, 'tmp', None) is not None:
