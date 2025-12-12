@@ -177,7 +177,8 @@ def cderi_ovL_outcore(mol, auxmol, coeff_o, coeff_v,
 
     if path is None:
         path = tempfile.NamedTemporaryFile(dir=param.TMPDIR).name
-    os.mkdir(path)
+    if not os.path.exists(path):
+        os.mkdir(path)
     file = lib.FileMp(path + '/eris.dat', 'w')
     eri = file.create_dataset(
         'eri', (naux_cart, nocc, nvir), 'f8', blksizes=(kextents, oblk))
