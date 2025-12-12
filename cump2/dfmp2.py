@@ -40,7 +40,7 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_rdm1=Fals
         auxbasis = df.make_auxbasis(mol, mp2fit=True)
     auxmol = df.make_auxmol(mol, auxbasis)
 
-    memory = lib.gpu_avail_bytes() // 8
+    memory = lib.gpu_avail_bytes(0.8) // 8
     a = nvir ** 2
     b = auxmol.nao * nvir * 2
     c = -1 * memory
