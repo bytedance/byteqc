@@ -1,0 +1,264 @@
+++++++++++ cump2 ccpvdz 160water 1GPU ++++++++++
+SCF not converged.
+SCF energy = -11998.1244343501
+Default auxbasis cc-pvdz-ri is used for O ccpvdz
+Default auxbasis cc-pvdz-ri is used for H ccpvdz
+num shells = 4800, num cGTOs = 13440
+MP2 with 74.63GB free memory, slice nocc(800) to 27. nvir:3040
+    CPU time for Initialize q_cond    149.97 sec, wall time     11.30 sec
+    CPU time for Initialize GPU cache      3.19 sec, wall time      0.54 sec
+    CPU time for cderi_ovL_outcore prepare    220.80 sec, wall time     20.38 sec
+    CPU time for cderi_ovL_outcore step1      0.00 sec, wall time      0.00 sec
+    CPU time for cderi_ovL_outcore step2      9.60 sec, wall time      9.34 sec
+    CPU time for cderi_ovL_outcore    230.42 sec, wall time     29.75 sec
+    CPU time for mp2_get_corr      6.19 sec, wall time      7.97 sec
+    CPU time for mp2    236.61 sec, wall time     37.71 sec
+MP2 total energy: -11998.124434350058
+MP2 correlation energy: 0
+cump2 Basis:ccpvdz Nwater:160 Nao:3840 NGPU:1 Time:7.946444272994995 (0,)
+============================================= 
+
+
+
+++++++++++ cump2 ccpvdz 192water 1GPU ++++++++++
+SCF not converged.
+SCF energy = -14397.7448992701
+Default auxbasis cc-pvdz-ri is used for O ccpvdz
+Default auxbasis cc-pvdz-ri is used for H ccpvdz
+num shells = 5760, num cGTOs = 16128
+MP2 with 74.62GB free memory, slice nocc(960) to 22. nvir:3648
+    CPU time for Initialize q_cond    221.93 sec, wall time     17.18 sec
+    CPU time for Initialize GPU cache      3.42 sec, wall time      0.82 sec
+    CPU time for cderi_ovL_outcore prepare    319.10 sec, wall time     30.36 sec
+    CPU time for cderi_ovL_outcore step1      0.00 sec, wall time      0.00 sec
+    CPU time for cderi_ovL_outcore step2     11.14 sec, wall time     11.24 sec
+    CPU time for cderi_ovL_outcore    330.25 sec, wall time     41.61 sec
+    CPU time for mp2_get_corr      7.26 sec, wall time      9.27 sec
+    CPU time for mp2    337.51 sec, wall time     50.88 sec
+MP2 total energy: -14397.744899270052
+MP2 correlation energy: 0
+cump2 Basis:ccpvdz Nwater:192 Nao:4608 NGPU:1 Time:9.228329181671143 (0,)
+============================================= 
+
+
+
+++++++++++ cump2 ccpvdz 228water 1GPU ++++++++++
+SCF not converged.
+SCF energy = -17097.3153131354
+Default auxbasis cc-pvdz-ri is used for O ccpvdz
+Default auxbasis cc-pvdz-ri is used for H ccpvdz
+num shells = 6840, num cGTOs = 19152
+MP2 with 74.61GB free memory, slice nocc(1140) to 18. nvir:4332
+    CPU time for Initialize q_cond    301.86 sec, wall time     21.68 sec
+    CPU time for Initialize GPU cache      3.34 sec, wall time      0.77 sec
+    CPU time for cderi_ovL_outcore prepare    422.87 sec, wall time     39.04 sec
+    CPU time for cderi_ovL_outcore step1      0.00 sec, wall time      0.00 sec
+    CPU time for cderi_ovL_outcore step2     13.23 sec, wall time     13.38 sec
+    CPU time for cderi_ovL_outcore    436.11 sec, wall time     52.43 sec
+    CPU time for mp2_get_corr      8.30 sec, wall time     10.64 sec
+    CPU time for mp2    444.41 sec, wall time     63.07 sec
+MP2 total energy: -17097.31531313539
+MP2 correlation energy: 0
+cump2 Basis:ccpvdz Nwater:228 Nao:5472 NGPU:1 Time:10.610530614852905 (0,)
+============================================= 
+
+
+
+++++++++++ cump2 ccpvdz 256water 1GPU ++++++++++
+SCF not converged.
+SCF energy = -19196.9779430212
+Default auxbasis cc-pvdz-ri is used for O ccpvdz
+Default auxbasis cc-pvdz-ri is used for H ccpvdz
+num shells = 7680, num cGTOs = 21504
+MP2 with 74.61GB free memory, slice nocc(1280) to 15. nvir:4864
+    CPU time for Initialize q_cond    376.72 sec, wall time     26.90 sec
+    CPU time for Initialize GPU cache      3.47 sec, wall time      0.84 sec
+    CPU time for cderi_ovL_outcore prepare    534.74 sec, wall time     49.68 sec
+    CPU time for cderi_ovL_outcore step1      0.00 sec, wall time      0.00 sec
+    CPU time for cderi_ovL_outcore step2     15.53 sec, wall time     15.65 sec
+    CPU time for cderi_ovL_outcore    550.29 sec, wall time     65.34 sec
+    CPU time for mp2_get_corr      9.64 sec, wall time     12.40 sec
+    CPU time for mp2    559.93 sec, wall time     77.75 sec
+MP2 total energy: -19196.977943021237
+MP2 correlation energy: 0
+cump2 Basis:ccpvdz Nwater:256 Nao:6144 NGPU:1 Time:12.338972806930542 (0,)
+============================================= 
+
+
+
+++++++++++ cump2 ccpvdz 320water 1GPU ++++++++++
+SCF not converged.
+SCF energy = -23996.2108615679
+Default auxbasis cc-pvdz-ri is used for O ccpvdz
+Default auxbasis cc-pvdz-ri is used for H ccpvdz
+num shells = 9600, num cGTOs = 26880
+MP2 with 74.60GB free memory, slice nocc(1600) to 12. nvir:6080
+    CPU time for Initialize q_cond    507.30 sec, wall time     38.81 sec
+    CPU time for Initialize GPU cache      3.44 sec, wall time      0.79 sec
+    CPU time for cderi_ovL_outcore prepare    728.31 sec, wall time     73.73 sec
+    CPU time for cderi_ovL_outcore step1      0.00 sec, wall time      0.00 sec
+    CPU time for cderi_ovL_outcore step2     19.17 sec, wall time     20.42 sec
+    CPU time for cderi_ovL_outcore    747.50 sec, wall time     94.18 sec
+    CPU time for mp2_get_corr     11.23 sec, wall time     14.57 sec
+    CPU time for mp2    758.73 sec, wall time    108.74 sec
+MP2 total energy: -23996.210861567888
+MP2 correlation energy: 0
+cump2 Basis:ccpvdz Nwater:320 Nao:7680 NGPU:1 Time:14.484031438827515 (0,)
+============================================= 
+
+
+
+++++++++++ cump2 ccpvtz 96water 1GPU ++++++++++
+SCF not converged.
+SCF energy = -7200.19435294429
+Default auxbasis cc-pvtz-ri is used for H ccpvtz
+Default auxbasis cc-pvtz-ri is used for O ccpvtz
+num shells = 4128, num cGTOs = 13536
+MP2 with 73.62GB free memory, slice nocc(480) to 16. nvir:5088
+    CPU time for Initialize q_cond    111.12 sec, wall time      8.80 sec
+    CPU time for Initialize GPU cache      3.08 sec, wall time      0.44 sec
+    CPU time for cderi_ovL_outcore prepare    192.56 sec, wall time     18.85 sec
+    CPU time for cderi_ovL_outcore step1      0.00 sec, wall time      0.00 sec
+    CPU time for cderi_ovL_outcore step2      9.87 sec, wall time      9.95 sec
+    CPU time for cderi_ovL_outcore    202.44 sec, wall time     28.82 sec
+    CPU time for mp2_get_corr      6.36 sec, wall time      8.23 sec
+    CPU time for mp2    208.80 sec, wall time     37.05 sec
+MP2 total energy: -7200.194352944291
+MP2 correlation energy: 0
+cump2 Basis:ccpvtz Nwater:96 Nao:5568 NGPU:1 Time:8.209717273712158 (0,)
+============================================= 
+
+
+
+++++++++++ cump2 ccpvtz 112water 1GPU ++++++++++
+SCF not converged.
+SCF energy = -8400.22783646997
+Default auxbasis cc-pvtz-ri is used for H ccpvtz
+Default auxbasis cc-pvtz-ri is used for O ccpvtz
+num shells = 4816, num cGTOs = 15792
+MP2 with 73.61GB free memory, slice nocc(560) to 13. nvir:5936
+    CPU time for Initialize q_cond    137.05 sec, wall time     11.29 sec
+    CPU time for Initialize GPU cache      3.23 sec, wall time      0.55 sec
+    CPU time for cderi_ovL_outcore prepare    241.94 sec, wall time     24.36 sec
+    CPU time for cderi_ovL_outcore step1      0.00 sec, wall time      0.00 sec
+    CPU time for cderi_ovL_outcore step2     10.92 sec, wall time     11.04 sec
+    CPU time for cderi_ovL_outcore    252.88 sec, wall time     35.41 sec
+    CPU time for mp2_get_corr      6.96 sec, wall time      8.90 sec
+    CPU time for mp2    259.84 sec, wall time     44.32 sec
+MP2 total energy: -8400.22783646997
+MP2 correlation energy: 0
+cump2 Basis:ccpvtz Nwater:112 Nao:6496 NGPU:1 Time:8.879632234573364 (0,)
+============================================= 
+
+
+
+++++++++++ cump2 ccpvtz 128water 1GPU ++++++++++
+SCF not converged.
+SCF energy = -9600.26313617684
+Default auxbasis cc-pvtz-ri is used for H ccpvtz
+Default auxbasis cc-pvtz-ri is used for O ccpvtz
+num shells = 5504, num cGTOs = 18048
+MP2 with 73.60GB free memory, slice nocc(640) to 11. nvir:6784
+    CPU time for Initialize q_cond    169.00 sec, wall time     12.68 sec
+    CPU time for Initialize GPU cache      3.19 sec, wall time      0.68 sec
+    CPU time for cderi_ovL_outcore prepare    305.78 sec, wall time     30.21 sec
+    CPU time for cderi_ovL_outcore step1      0.00 sec, wall time      0.00 sec
+    CPU time for cderi_ovL_outcore step2     12.26 sec, wall time     12.37 sec
+    CPU time for cderi_ovL_outcore    318.06 sec, wall time     42.60 sec
+    CPU time for mp2_get_corr      7.66 sec, wall time      9.85 sec
+    CPU time for mp2    325.72 sec, wall time     52.45 sec
+MP2 total energy: -9600.26313617684
+MP2 correlation energy: 0
+cump2 Basis:ccpvtz Nwater:128 Nao:7424 NGPU:1 Time:9.820409297943115 (0,)
+============================================= 
+
+
+
+++++++++++ cump2 ccpvtz 160water 1GPU ++++++++++
+SCF not converged.
+SCF energy = -12000.3322413082
+Default auxbasis cc-pvtz-ri is used for H ccpvtz
+Default auxbasis cc-pvtz-ri is used for O ccpvtz
+num shells = 6880, num cGTOs = 22560
+MP2 with 73.59GB free memory, slice nocc(800) to 8. nvir:8480
+    CPU time for Initialize q_cond    266.48 sec, wall time     22.11 sec
+    CPU time for Initialize GPU cache      3.38 sec, wall time      0.78 sec
+    CPU time for cderi_ovL_outcore prepare    452.12 sec, wall time     48.76 sec
+    CPU time for cderi_ovL_outcore step1      0.00 sec, wall time      0.00 sec
+    CPU time for cderi_ovL_outcore step2     16.63 sec, wall time     17.74 sec
+    CPU time for cderi_ovL_outcore    468.77 sec, wall time     66.53 sec
+    CPU time for mp2_get_corr      9.62 sec, wall time     12.56 sec
+    CPU time for mp2    478.39 sec, wall time     79.09 sec
+MP2 total energy: -12000.332241308184
+MP2 correlation energy: 0
+cump2 Basis:ccpvtz Nwater:160 Nao:9280 NGPU:1 Time:12.527550220489502 (0,)
+============================================= 
+
+
+
+++++++++++ cump2 ccpvqz 64water 1GPU ++++++++++
+SCF not converged.
+SCF energy = -4800.51635325174
+Default auxbasis cc-pvqz-ri is used for O ccpvqz
+Default auxbasis cc-pvqz-ri is used for H ccpvqz
+num shells = 3840, num cGTOs = 15488
+MP2 with 71.56GB free memory, slice nocc(320) to 11. nvir:7040
+    CPU time for Initialize q_cond    111.47 sec, wall time      9.49 sec
+    CPU time for Initialize GPU cache      3.11 sec, wall time      0.41 sec
+    CPU time for cderi_ovL_outcore prepare    230.23 sec, wall time     22.48 sec
+    CPU time for cderi_ovL_outcore step1      0.00 sec, wall time      0.00 sec
+    CPU time for cderi_ovL_outcore step2     11.80 sec, wall time     11.88 sec
+    CPU time for cderi_ovL_outcore    242.05 sec, wall time     34.37 sec
+    CPU time for mp2_get_corr      7.04 sec, wall time      9.22 sec
+    CPU time for mp2    249.09 sec, wall time     43.59 sec
+MP2 total energy: -4800.516353251742
+MP2 correlation energy: 0
+cump2 Basis:ccpvqz Nwater:64 Nao:7360 NGPU:1 Time:9.192591905593872 (0,)
+============================================= 
+
+
+
+++++++++++ cump2 ccpvqz 80water 1GPU ++++++++++
+SCF not converged.
+SCF energy = -6000.64958232545
+Default auxbasis cc-pvqz-ri is used for O ccpvqz
+Default auxbasis cc-pvqz-ri is used for H ccpvqz
+num shells = 4800, num cGTOs = 19360
+MP2 with 71.54GB free memory, slice nocc(400) to 8. nvir:8800
+    CPU time for Initialize q_cond    141.07 sec, wall time     10.89 sec
+    CPU time for Initialize GPU cache      3.18 sec, wall time      0.54 sec
+    CPU time for cderi_ovL_outcore prepare    293.34 sec, wall time     29.91 sec
+    CPU time for cderi_ovL_outcore step1      0.00 sec, wall time      0.00 sec
+    CPU time for cderi_ovL_outcore step2     14.71 sec, wall time     15.77 sec
+    CPU time for cderi_ovL_outcore    308.07 sec, wall time     45.75 sec
+    CPU time for mp2_get_corr      8.93 sec, wall time     10.38 sec
+    CPU time for mp2    317.01 sec, wall time     56.13 sec
+MP2 total energy: -6000.649582325454
+MP2 correlation energy: 0
+cump2 Basis:ccpvqz Nwater:80 Nao:9200 NGPU:1 Time:9.558921098709106 (0,)
+============================================= 
+
+
+
+++++++++++ cump2 ccpvqz 96water 1GPU ++++++++++
+SCF not converged.
+SCF energy = -7200.77782998184
+Default auxbasis cc-pvqz-ri is used for O ccpvqz
+Default auxbasis cc-pvqz-ri is used for H ccpvqz
+num shells = 5760, num cGTOs = 23232
+MP2 with 71.53GB free memory, slice nocc(480) to 7. nvir:10560
+    CPU time for Initialize q_cond    206.62 sec, wall time     18.19 sec
+    CPU time for Initialize GPU cache      3.38 sec, wall time      0.70 sec
+    CPU time for cderi_ovL_outcore prepare    436.97 sec, wall time     46.66 sec
+    CPU time for cderi_ovL_outcore step1      0.00 sec, wall time      0.00 sec
+    CPU time for cderi_ovL_outcore step2     16.76 sec, wall time     17.79 sec
+    CPU time for cderi_ovL_outcore    453.75 sec, wall time     64.48 sec
+    CPU time for mp2_get_corr     11.24 sec, wall time     13.10 sec
+    CPU time for mp2    464.99 sec, wall time     77.58 sec
+MP2 total energy: -7200.777829981842
+MP2 correlation energy: 0
+cump2 Basis:ccpvqz Nwater:96 Nao:11040 NGPU:1 Time:11.959436655044556 (0,)
+============================================= 
+
+
+
