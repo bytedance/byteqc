@@ -20,7 +20,7 @@ from pyscf.lib import param
 
 
 def CCSD(mf, frozen=None, mo_coeff=None, mo_occ=None, gpulim=None,
-         cpulim=None, pool=None, path=param.TMPDIR, mem_ratio=0.7):
+         cpulim=None, pool=None, path=param.TMPDIR, mem_ratio=0.65):
     if isinstance(mf, scf.uhf.UHF) or isinstance(mf, scf.ghf.GHF):
         AssertionError('Not implement')
     else:
@@ -29,7 +29,7 @@ def CCSD(mf, frozen=None, mo_coeff=None, mo_occ=None, gpulim=None,
 
 
 def RCCSD(mf, frozen=None, mo_coeff=None, mo_occ=None, gpulim=None,
-          cpulim=None, pool=None, path=param.TMPDIR, mem_ratio=0.7):
+          cpulim=None, pool=None, path=param.TMPDIR, mem_ratio=0.65):
     if getattr(mf, 'with_df', None):
         return dfccsd.RCCSD(mf, frozen, mo_coeff, mo_occ, gpulim,
                             cpulim, pool=pool, path=path, mem_ratio=mem_ratio)

@@ -37,7 +37,7 @@ from byteqc import lib
 from byteqc.lib import Mg, MemoryTypeHost, gemm, contraction
 from pyscf import df
 from pyscf.lib import logger, prange, param
-from byteqc.cump2.dfmp2 import cderi_ovL_outcore, div_t2, mp2_get_occ_1rdm
+from byteqc.cump2.dfmp2_2 import cderi_ovL_outcore, div_t2, mp2_get_occ_1rdm
 from multiprocessing import Pool
 from byteqc.cuobc.lib.int3c import VHFOpt3c, get_int2c, get_int3c
 from gpu4pyscf.grad.rhf import _jk_energy_per_atom
@@ -51,7 +51,7 @@ get_de_int3c_nao_gs = 128
 get_de_int3c_naux_gs = 256
 
 
-def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True):
+def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_em=False):
     if verbose is None:
         verbose = mol.verbose
     log = logger.new_logger(rhf, verbose)
@@ -132,8 +132,8 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True):
     mo_energy = cupy.asarray(rhf.mo_energy)
     vslices = [slice(i[0], i[1]) for i in prange(0, nvir, vblk)]
     auxslices = [slice(i[0], i[1]) for i in prange(0, naux, auxblk)]
-    e_corr, doo, dvv, gamma_2c = _grad_intermediates(
-        mol, path, vslices, oslices, auxslices, nvir, nocc, auxmol.nao, mo_energy, log=log)
+    e_corr, doo, dvv, gamma_2c, em = _grad_intermediates(
+        mol, path, vslices, oslices, auxslices, nvir, nocc, auxmol.nao, mo_energy, log=log, with_em=with_em)
     log.info(f'MP2 total energy: {e_corr + rhf.e_tot}')
     log.info(f'MP2 correlation energy: {e_corr}')
     lib.Mg.mapgpu(lambda: lib.free_all_blocks())
@@ -214,9 +214,9 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True):
     int2c2e_ip1 = auxmol.intor('int2c2e_ip1')
 
     dm1_mix = hf_dm1 + dm1p
-    de += _jk_energy_per_atom(mol, dm1_mix)
-    de -= _jk_energy_per_atom(mol, dm1p)
-    de -= _jk_energy_per_atom(mol, hf_dm1)
+    de += cupy.asarray(_jk_energy_per_atom(mol, dm1_mix))
+    de -= cupy.asarray(_jk_energy_per_atom(mol, dm1p))
+    de -= cupy.asarray(_jk_energy_per_atom(mol, hf_dm1))
     dm1_mix = dm1p = hf_dm1 = None
     offsetdic = mol.offset_nr_by_atom()
     aux_offsetdic = auxmol.offset_nr_by_atom()
@@ -261,11 +261,14 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True):
     del file['j2c']
     file.close()
 
-    return e_corr, e_corr + rhf.e_tot, de
+    if with_em:
+        return e_corr, e_corr + rhf.e_tot, de, em
+    else:
+        return e_corr, e_corr + rhf.e_tot, de
 
 
 def _grad_intermediates(mol, path, vslices, oslices, auxslices,
-                        nvir, nocc, naux, e_mo, log=None):
+                        nvir, nocc, naux, e_mo, log=None, with_em=False):
     if log is None:
         log = logger.new_logger(mol, mol.verbose)
     time0 = logger.process_clock(), logger.perf_counter()
@@ -420,6 +423,7 @@ def _grad_intermediates(mol, path, vslices, oslices, auxslices,
         gamma_3c = gamma_3c.reshape(naux, -1)
         lib.solve_triangular(j2c.T, gamma_3c, overwrite_b=True, lower=False)
         if waits[gid] is not None:
+            wait_loop(waits[gid])
             for w in waits[gid]:
                 w.wait()
         gamma_3c = gamma_3c.reshape(naux, -1, nvir)
@@ -468,10 +472,10 @@ def _grad_intermediates(mol, path, vslices, oslices, auxslices,
 
     lib.Mg.mapgpu(lambda: lib.free_all_blocks())
 
-    rdm1_occ = mp2_get_occ_1rdm(path, vslices, nvir,
-                                nocc, naux, e_mo, log)
+    rdm1_occ, em = mp2_get_occ_1rdm(path, vslices, nvir,
+                                nocc, naux, e_mo, log, with_em=with_em)
     time0 = log.timer("_grad_intermediates done!", *time0)
-    return e_corr, rdm1_occ, rdm1_vir, gamma_2c_h
+    return e_corr, rdm1_occ, rdm1_vir, gamma_2c_h, em
 
 
 def get_I_mat(mol, auxmol, path, auxslices,
@@ -580,8 +584,10 @@ def get_I_mat(mol, auxmol, path, auxslices,
             cupy.copyto(int3c_Lvp, tmp)
 
             if waits is not None:
-                for w in waits:
-                    w.wait()
+                wait_loop(waits.waits)
+                waits.wait()
+                # for w in waits:
+                #     w.wait()
                 waits = None
 
             g3c_d = lib.empty_from_buf(bufs[gid], g3c_h.shape, 'f8')
@@ -662,13 +668,24 @@ def get_I_mat2(mol, auxmol, coeff_o, coeff_v, nocc, path, log=None):
 
         g3c_h = lib.empty_from_buf(gamma_3c_h[gid],
                                    (sQ.stop - sQ.start, nocc, nvir), 'f8')
-        gamma_3c_f.getitem(numpy.s_[sQ], pool=pools[gid], buf=g3c_h).wait()
+        # gamma_3c_f.getitem(numpy.s_[sQ], pool=pools[gid], buf=g3c_h).wait()
+        wait_getitem = gamma_3c_f.getitem(numpy.s_[sQ], pool=pools[gid], buf=g3c_h)
+        wait_loop(wait_getitem.waits)
+        wait_getitem.wait()
+        wait_getitem = None
+
         g3c_d = lib.empty_from_buf(g3cs[gid], g3c_h.shape, 'f8')
         g3c_d.set(g3c_h)
 
         i3c_h = lib.empty_from_buf(int3c_h[gid],
                                    (sQ.stop - sQ.start, nao, nao), 'f8')
-        int3c_f.getitem(numpy.s_[sQ], pool=pools[gid], buf=i3c_h).wait()
+        
+        # int3c_f.getitem(numpy.s_[sQ], pool=pools[gid], buf=i3c_h).wait()
+        wait_getitem = int3c_f.getitem(numpy.s_[sQ], pool=pools[gid], buf=i3c_h)
+        wait_loop(wait_getitem.waits)
+        wait_getitem.wait()
+        wait_getitem = None
+        
         i3c_d = lib.empty_from_buf(int3cs[gid], i3c_h.shape, 'f8')
         i3c_d.set(i3c_h)
 
@@ -812,8 +829,10 @@ def get_de_int3c(mol, auxmol, path, auxslices,
         g3c_h = lib.empty_from_buf(
             gamma_3c_h[gid], (sQ.stop - sQ.start, nocc, nvir), 'f8')
         waits = gamma_3c_f.getitem(numpy.s_[sQ], pool=pools[gid], buf=g3c_h)
-        for w in waits:
-            w.wait()
+        wait_loop(waits.waits)
+        waits.wait()
+        waits = None
+
         g3c_d = lib.empty_from_buf(gamma_3c_d[gid], g3c_h.shape, 'f8')
         g3c_d.set(g3c_h)
 
@@ -916,9 +935,9 @@ def get_de_int3c(mol, auxmol, path, auxslices,
                                    (naux, so.stop - so.start, nvir), 'f8')
         waits = gamma_3c_f.getitem(numpy.s_[:, so],
                                    pool=pools[gid], buf=g3c_h)
-
-        for w in waits:
-            w.wait()
+        wait_loop(waits.waits)
+        waits.wait()
+        waits = None
 
         g3c_d = lib.empty_from_buf(gamma_3c_d[gid], g3c_h.shape, 'f8')
         g3c_d.set(g3c_h)
@@ -926,8 +945,6 @@ def get_de_int3c(mol, auxmol, path, auxslices,
                                 'Kia', buf=int3c_d[gid])
         G = contraction('Kia', inter_tmp, 'qa', coeff_v_sort[gid],
                         'Kiq', buf=gamma_3c_d[gid])
-
-        waits = None
 
         for i_ind in j_log_qs_fix_i.keys():
             si = islices[j_log_qs_fix_i[i_ind][0]]
@@ -1068,6 +1085,7 @@ def cderi_outcore_tmp(mol, auxmol, mo_coeff, path, log=None):
 
         tmp = None
         if waits[gid]:
+            wait_loop(waits[gid])
             for w in waits[gid]:
                 w.wait()
 
@@ -1111,14 +1129,21 @@ def cderi_outcore_tmp(mol, auxmol, mo_coeff, path, log=None):
         so_len = so.stop - so.start
         eri_h = lib.empty_from_buf(
             eris_h[gid], (naux_cart, so_len, norb), 'f8')
-        eri.getitem(numpy.s_[:, so], pool=pools_r[gid],
-                    buf=eri_h).wait()
+        # eri.getitem(numpy.s_[:, so], pool=pools_r[gid],
+        #             buf=eri_h).wait()
+        waits_eri_get = eri.getitem(numpy.s_[:, so],
+                                    pool=pools_r[gid],
+                                    buf=eri_h)
+        wait_loop(waits_eri_get.waits)
+        waits_eri_get.wait()
+
         eri_d = lib.empty_from_buf(eris_d[gid], eri_h.shape)
         eri_d[:] = 0
         eri_d.set(eri_h)
         cderi_d = contraction('Lpq', eri_d, 'KL', auxcoeff[gid], 'Kpq',
                               buf=cderis_d[gid])
         if waits[gid]:
+            wait_loop(waits[gid])
             for w in waits[gid]:
                 w.wait()
         cderi_h = lib.empty_from_buf(cderis_h[gid], cderi_d.shape)
@@ -1130,6 +1155,7 @@ def cderi_outcore_tmp(mol, auxmol, mo_coeff, path, log=None):
     Mg.map(get_cderi, oslices)
     for wait in waits:
         if wait:
+            wait_loop(wait)
             for w in wait:
                 w.wait()
     for p in pools_r:
@@ -1141,3 +1167,16 @@ def cderi_outcore_tmp(mol, auxmol, mo_coeff, path, log=None):
     cderis_d = eris_d = cderis_h = eris_h = waits = pools_r = pools_w = None
     time0 = log.timer("cderi_outcore_tmp step2", *time0)
     return path
+
+def wait_loop(waits):
+    tmp_a = cupy.random.randn(1000, 1000)
+    tmp_b = cupy.random.randn(1000, 1000)
+    tmp_c = cupy.zeros((1000, 1000)) 
+    while True:
+        break_flag = True
+        for w in waits:
+            break_flag = break_flag and w.ready()
+        if break_flag:
+            break
+        cupy.dot(tmp_a, tmp_b, out=tmp_c)
+    tmp_a = tmp_b = tmp_c = None

@@ -99,6 +99,7 @@ class SIE_kernel:
         self.pair_group_size = 500
         self.t2_y_buffer_pool_size = RDM_MEMORY_POOL_SIZE
         self.local_orb_path = None
+        self.ewald_correct = False
 
     def simulate(self, molecule, mean_field, fragments):
 
@@ -205,6 +206,13 @@ class SIE_kernel:
             self.LG.logger.info('eq_list: %s' % self.equivalent_list)
             self.LG.logger.info(
                 '=== Run HF for full system and build low_level_info')
+            
+            if self.ewald_correct:
+                assert getattr(molecule, 'pbc_intor', None), \
+                    'Ewald correction only supports PBC, please check the input molecule!'
+                if self.RDM and 'MP2' in self.electronic_structure_solver.__name__:
+                    self.LG.logger.info(
+                        'Warning! When Ewald correction is enabled, RDM calculated energy will be no longer reliable for MP2!')
 
             if self.aux_basis is not None:
                 self.LG.logger.info(
@@ -302,7 +310,10 @@ class SIE_kernel:
                 low_level_info = self.PR.load_class(
                     self.PR.recorder['low_level_info_class'])
                 low_level_info.mol_full = molecule
-                del low_level_info.mol_full.stdout
+                try:
+                    del low_level_info.mol_full.stdout
+                except:
+                    pass
                 self.low_level_info = low_level_info
 
             else:
@@ -315,9 +326,13 @@ class SIE_kernel:
                                                                   with_eri=False if self.eri_file is None else True,
                                                                   oei=self.oei_file,
                                                                   local_orb_path=self.local_orb_path,
+                                                                  ewald_correct=self.ewald_correct,
                                                                   )
                 if hasattr(low_level_info.mol_full, 'stdout'):
-                    del low_level_info.mol_full.stdout
+                    try:
+                        del low_level_info.mol_full.stdout
+                    except:
+                        pass
                 del mean_field
                 self.low_level_info = low_level_info
 
@@ -517,7 +532,9 @@ class SIE_kernel:
 
             if False in self.PR.recorder['Cluster']:
                 self.LG.logger.info('Building vhfopt for all node!')
-                if high_level_frag.vhfopt is None and high_level_frag.eri is None:
+                if high_level_frag.vhfopt is None and \
+                    high_level_frag.eri is None and \
+                    not getattr(molecule, 'pbc_intor', None):
                     vhfopt = VHFOpt3c(
                         self.low_level_info.mol_full,
                         self.low_level_info.auxmol,
@@ -1091,28 +1108,38 @@ class SIE_kernel:
                 self.LG.logger.info(
                     'Total energy: %s' %
                     (self.energy.tolist()))
+                
+                for node_ind_kill in range(1, size):
+                    comm2.send(
+                        False, dest=node_ind_kill, tag=node_ind_kill)
 
             self.PR.recorder['energy'] = self.energy.tolist()
             self.PR.save()
 
             self.LG.logger.info(
                 '-------------- All process finished. Start to clean up!')
+            
+            def delete_folders(path, parent_pattern, child_pattern):
+                for root, dirs, _ in os.walk(path):
+                    for dir in fnmatch.filter(dirs, parent_pattern):
+                        cluster_folder = os.path.join(root, dir)
+                        for subroot, subdirs, _ in os.walk(
+                                cluster_folder):
+                            for subdir in fnmatch.filter(
+                                    subdirs, child_pattern):
+                                shutil.rmtree(
+                                    os.path.join(subroot, subdir))
+                                pass
+
             if self.RDM:
                 if False not in self.PR.recorder['RDM']:
-                    def delete_folders(path, parent_pattern, child_pattern):
-                        for root, dirs, _ in os.walk(path):
-                            for dir in fnmatch.filter(dirs, parent_pattern):
-                                cluster_folder = os.path.join(root, dir)
-                                for subroot, subdirs, _ in os.walk(
-                                        cluster_folder):
-                                    for subdir in fnmatch.filter(
-                                            subdirs, child_pattern):
-                                        shutil.rmtree(
-                                            os.path.join(subroot, subdir))
-                                        pass
-
                     delete_folders(
                         self.PR.filepath + 'Cluster/', 'Cluster_*', 'th*')
+            else:
+                if 'CCSD' in self.electronic_structure_solver.__name__ and self.in_situ_T:
+                    delete_folders(
+                        self.PR.filepath + 'Cluster/', 'Cluster_*', 'th*')
+
 
             if self.PR.recorder['Cluster'] == [True] * len(equi_part):
                 try:

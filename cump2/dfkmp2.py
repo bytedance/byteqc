@@ -22,13 +22,16 @@ from byteqc.lib import Mg, MemoryTypeHost, contraction, unpack_tril, \
 from byteqc.cump2.dfmp2 import mp2_get_corr
 from pyscf import df
 from pyscf.lib import logger, prange, param
+from pyscf.pbc import tools
+from pyscf.pbc.cc.ccsd import _adjust_occ
 from multiprocessing import Pool
 import os
 import h5py
 
 
 def kernel(mol, rhf, auxbasis=None, verbose=None,
-           cleanfile=True, cderi_path=None, with_rdm1=False):
+           cleanfile=True, cderi_path=None, with_rdm1=False,
+           remove_ewald=False, add_ewald=False):
     if verbose is None:
         verbose = mol.verbose
     log = logger.new_logger(rhf, verbose)
@@ -43,13 +46,13 @@ def kernel(mol, rhf, auxbasis=None, verbose=None,
         auxbasis = df.make_auxbasis(mol, mp2fit=True)
     auxmol = df.make_auxmol(mol, auxbasis)
 
-    if cderi_path is None:
-        cderi_path = rhf.with_df._cderi_to_save
+    # if cderi_path is None:
+    #     cderi_path = rhf.with_df._cderi_to_save
 
-    assert isinstance(cderi_path, str), 'cderi_path must be a string, but ' \
-        'got  %s' % type(cderi_path)
+    # assert isinstance(cderi_path, str), 'cderi_path must be a string, but ' \
+    #     'got  %s' % type(cderi_path)
 
-    memory = lib.gpu_avail_bytes() // 8
+    memory = lib.gpu_avail_bytes(0.7) // 8
     a = nvir ** 2
     b = auxmol.nao * nvir * 2
     c = -1 * memory
@@ -79,13 +82,34 @@ def kernel(mol, rhf, auxbasis=None, verbose=None,
         'calculations' % memory
     log.info('MP2 with %.2fGB free memory, slice nocc(%d) to %d. nvir:%d' % (
         memory * 8 / 1e9, nocc, oblk, nvir))
-
-    path, oslices = cderi_ovL_gamma_point_outcore(
-        mol, auxmol, cderi_path, coeff_o, coeff_v, oblk, vblk, log=log)
-    time1 = log.timer('cderi_ovL_outcore', *time0)
+    if cderi_path is not None:
+        path, oslices = cderi_ovL_gamma_point_outcore(
+            mol, auxmol, cderi_path, coeff_o, coeff_v, oblk, vblk, log=log)
+    else:
+        try:
+            from byteqc.cump2.pbc_cderi import (
+                cderi_ovL_gamma_point_outcore_gpu4pyscf_Mg as cderi_ovL_gamma_point_outcore_g,
+            )
+        except Exception as e:
+            raise ImportError(
+                "Please install gpu4pyscf to use this feature."
+                " Alternatively, you can set cderi_path to a valid path."
+            ) from e
+        path, oslices = cderi_ovL_gamma_point_outcore_g(
+            mol, auxmol, coeff_o, coeff_v, oblk, vblk, log=log)
+    time1 = log.timer('cderi generation time', *time0)
 
     lib.Mg.mapgpu(lambda: lib.free_all_blocks())
     mo_energy = rhf.mo_energy.copy()
+
+    if remove_ewald or add_ewald:
+        ewald_correct = tools.madelung(rhf.cell, rhf.kpt)
+        if add_ewald:
+            mo_energy[:nocc] -= ewald_correct
+        elif remove_ewald:
+            mo_energy[:nocc] += ewald_correct
+    
+
     vslices = [slice(i[0], i[1]) for i in prange(0, nvir, vblk)]
     e_corr, rdm1 = mp2_get_corr(
         mol, path, oslices, nvir, nocc, auxmol.nao, mo_energy, log=log, with_rdm1=with_rdm1, vslices=vslices)

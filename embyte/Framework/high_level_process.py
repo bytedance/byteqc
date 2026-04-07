@@ -145,7 +145,7 @@ class high_level_processing:
 
             init_cluster_fock = cupy.asarray(reduce(
                 cupy.dot, (LOEO[:, :norb_fb].T, self.low_level_info.fock_LO, LOEO[:, :norb_fb])))
-            init_cluster_mo_energy, init_cluster_mo_coeff = cupy.linalg.eigh(
+            _, init_cluster_mo_coeff = cupy.linalg.eigh(
                 init_cluster_fock)
             init_cluster_mo_coeff = fix_orbital_sign(init_cluster_mo_coeff)
             init_cluster_nele = round(
@@ -619,6 +619,10 @@ class high_level_processing:
                 self.LG.logger.info('--------------')
 
             high_level_solver_frag = None
+            cupy.cuda.get_current_stream().synchronize()
+            lib.free_all_blocks()
+            gc.collect()
+
             self.PR.recorder['high_level_solved'][th_index] = True
             self.PR.save()
             shutil.rmtree(self.PR.recorder['eri_path'][th_index])
@@ -626,6 +630,8 @@ class high_level_processing:
                 file = lib.FileMp(os.path.join(t1t2_path, '_t2'), 'a')
                 del file['t2']
                 file.close()
+            
+            self.PR.delet_obj('LOBNO')
 
         self.PR.recorder['stage'][1] = True
         self.PR.save()

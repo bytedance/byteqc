@@ -368,7 +368,7 @@ def eri_ondisk_OVL_SIE_MP2(mol, cderi_AO_file, mo_coeff_occ1,
     nocc2 = mo_coeff_occ2.shape[1]
     nvir2 = mo_coeff_unocc2.shape[1]
 
-    free_size = lib.gpu_avail_bytes() / 8
+    free_size = lib.gpu_avail_bytes(0.35) / 8
 
     nmo_pair = int(nmo * (nmo - 1) / 2 + nmo)
 
@@ -456,9 +456,21 @@ def eri_ondisk_OVL_SIE_MP2(mol, cderi_AO_file, mo_coeff_occ1,
                 process_r_cderi.append(process)
 
             for p in process_r_cderi:
+                tmp_con_a = cupy.random.rand(1000, 1000)
+                tmp_con_b = cupy.random.rand(1000, 1000)
+                tmp_con_out = cupy.empty_like(tmp_con_a)
+                while not p.ready():
+                    lib.gemm(tmp_con_a, tmp_con_b, c=tmp_con_out)
+                tmp_con_a = tmp_con_b = tmp_con_out = None
                 p.get()
         else:
             for p in process_r_cderi:
+                tmp_con_a = cupy.random.rand(1000, 1000)
+                tmp_con_b = cupy.random.rand(1000, 1000)
+                tmp_con_out = cupy.empty_like(tmp_con_a)
+                while not p.ready():
+                    lib.gemm(tmp_con_a, tmp_con_b, c=tmp_con_out)
+                tmp_con_a = tmp_con_b = tmp_con_out = None
                 p.get()
 
             cderi = cderi_next
@@ -964,9 +976,21 @@ def eri_ondisk_high_level_solver_incore(
                 process_r_cderi.append(process)
 
             for p in process_r_cderi:
+                tmp_con_a = cupy.random.rand(1000, 1000)
+                tmp_con_b = cupy.random.rand(1000, 1000)
+                tmp_con_out = cupy.empty_like(tmp_con_a)
+                while not p.ready():
+                    lib.gemm(tmp_con_a, tmp_con_b, c=tmp_con_out)
+                tmp_con_a = tmp_con_b = tmp_con_out = None
                 p.get()
         else:
             for p in process_r_cderi:
+                tmp_con_a = cupy.random.rand(1000, 1000)
+                tmp_con_b = cupy.random.rand(1000, 1000)
+                tmp_con_out = cupy.empty_like(tmp_con_a)
+                while not p.ready():
+                    lib.gemm(tmp_con_a, tmp_con_b, c=tmp_con_out)
+                tmp_con_a = tmp_con_b = tmp_con_out = None
                 p.get()
 
             cderi = cderi_next
@@ -1404,6 +1428,7 @@ def eri_high_level_solver_incore_with_jk(
         sij_eri_vk_d = lib.empty_from_buf(
             buff_eri_d, (ni * nmo, naux_cart), 'f8')
         sij_eri_vk_d.set(sij_eri_vk_h)
+        cupy.cuda.get_current_stream().synchronize()
 
         if si_ind + 1 < len(si_list):
             si_next = si_list[si_ind + 1]
@@ -1473,6 +1498,7 @@ def eri_high_level_solver_incore_with_jk(
 
         sij_unL_d = lib.empty_from_buf(buff_eri_d, (ni * nmo, naux_cart), 'f8')
         sij_unL_d.set(sij_unL_h)
+        cupy.cuda.get_current_stream().synchronize()
 
         if si_ind + 1 < len(si_list):
             si_next = si_list[si_ind + 1]
@@ -1491,7 +1517,7 @@ def eri_high_level_solver_incore_with_jk(
             transb='N')
         solve_triangular(j2c, sij_L_d.T, lower=True, overwrite_b=True,)
         sij = slice(si.start * nmo, si.stop * nmo)
-        sij_L_d.get(out=ijL[sij])
+        sij_L_d.get(out=ijL[sij], blocking=True)
         lib.contraction('iL', sij_L_d, 'L', eri_vj, 'i', vj_d[sij], beta=1.0)
         lib.gemm(sij_L_d, sij_L_d, LL_svd, transa='T', transb='N', beta=1.0)
         cupy.cuda.get_current_stream().synchronize()
@@ -1691,9 +1717,21 @@ def eri_ondisk_high_level_solver_incore_with_jk(
                 process_r_cderi.append(process)
 
             for p in process_r_cderi:
+                tmp_con_a = cupy.random.rand(1000, 1000)
+                tmp_con_b = cupy.random.rand(1000, 1000)
+                tmp_con_out = cupy.empty_like(tmp_con_a)
+                while not p.ready():
+                    lib.gemm(tmp_con_a, tmp_con_b, c=tmp_con_out)
+                tmp_con_a = tmp_con_b = tmp_con_out = None
                 p.get()
         else:
             for p in process_r_cderi:
+                tmp_con_a = cupy.random.rand(1000, 1000)
+                tmp_con_b = cupy.random.rand(1000, 1000)
+                tmp_con_out = cupy.empty_like(tmp_con_a)
+                while not p.ready():
+                    lib.gemm(tmp_con_a, tmp_con_b, c=tmp_con_out)
+                tmp_con_a = tmp_con_b = tmp_con_out = None
                 p.get()
 
             cderi = cderi_next

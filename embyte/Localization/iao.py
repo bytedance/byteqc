@@ -41,7 +41,7 @@ def reference_mol_get_mask(mol):
     return mask
 
 
-def iao_pao_localization(mol, mf, minao='minao', tol=1e-12):
+def iao_pao_localization(mol, mf, minao='minao', tol=1e-12, just_iao=False):
 
     nocc = numpy.where(cupy.asarray(mf.mo_occ) > 0)[0].size
     aomo_coeff_occ = cupy.asarray(mf.mo_coeff)[:, : nocc]
@@ -101,7 +101,7 @@ def iao_pao_localization(mol, mf, minao='minao', tol=1e-12):
 
     coeff_iao = get_vec_lowdin(coeff_iao, ao_ovlp)
 
-    if coeff_iao.shape[0] == coeff_iao.shape[1]:
+    if coeff_iao.shape[0] == coeff_iao.shape[1] or just_iao:
         # The mol has the same basis size with the IAO reference mol.
         return coeff_iao
 

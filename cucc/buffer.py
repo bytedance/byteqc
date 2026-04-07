@@ -467,8 +467,12 @@ class BufferPool():
                 tmp = self.empty(src.shape, src.dtype, type=MemoryTypeDevice)
                 tmp.set(src[:], stream=stream)
                 cupy.ndarray.__setitem__(dest, key, tmp)
-        elif i == 4 or i == 5:  # cpu to cpu/file
-            dest[key] = src
+        # elif i == 4 or i == 5:  # cpu to cpu/file
+        #     dest[key] = src
+        elif i == 4:  # cpu to cpu
+            numpy.ndarray.__setitem__(dest, key, src)
+        elif i == 5:  # cpu to file
+            h5py.Dataset.__setitem__(dest, key, src)
         elif i == 7:  # file to cpu
             numpy.ndarray.__setitem__(dest, key, src[:])
         else:  # file to file

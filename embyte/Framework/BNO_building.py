@@ -18,6 +18,7 @@ from pyscf.lib import prange
 from byteqc.cump2.dfmp2 import div_t2
 from byteqc.embyte.Tools.tool_lib import fix_orbital_sign
 from byteqc.embyte.ERI import eri_trans
+# from byteqc.embyte.ERI import eri_trans_gpu4pyscf as eri_trans_g
 from byteqc import lib
 from functools import reduce
 import numpy
@@ -45,6 +46,10 @@ def SIE_BNO_builder(low_level_info, fb_size_list, LOEO,
 
     fb_n_electron = numpy.sum(EO_occupation[fb_list])
     fb_nocc = int(fb_n_electron // 2)
+
+    # if low_level_info.ewald_correct:
+    #     fb_mo_energy[ : fb_nocc] -= low_level_info.madelung
+
 
     tot_nocc = int(low_level_info.mol_full.nelectron // 2)
 
@@ -90,18 +95,36 @@ def SIE_BNO_builder(low_level_info, fb_size_list, LOEO,
     gc.collect()
 
     if eri is None:
+        if getattr(low_level_info.mol_full, 'pbc_intor', None):
+            try:
+                from byteqc.embyte.ERI import eri_trans_gpu4pyscf as eri_trans_g
+            except Exception as e:
+                raise ImportError(
+                    "Please install gpu4pyscf to use this feature."
+                    " Alternatively, you can set cderi_path to a valid path."
+                ) from e
 
-        ovL_fb_occ_full_vir, voL_full_occ_fb_vir = eri_trans.eri_OVL_SIE_MP2(
-            low_level_info.mol_full,
-            low_level_info.auxmol,
-            subspace_fb_occ_full_vir_AOMO[:, : fb_nocc],
-            subspace_fb_occ_full_vir_AOMO[:, fb_nocc:],
-            subspace_full_occ_fb_vir_AOMO[:, : tot_nocc],
-            subspace_full_occ_fb_vir_AOMO[:, tot_nocc:],
-            low_level_info.j2c,
-            logger,
-            vhfopt=vhfopt,
-        )
+            ovL_fb_occ_full_vir, voL_full_occ_fb_vir = eri_trans_g.eri_OVL_SIE_MP2(
+                low_level_info.mol_full,
+                low_level_info.auxmol,
+                subspace_fb_occ_full_vir_AOMO[:, : fb_nocc],
+                subspace_fb_occ_full_vir_AOMO[:, fb_nocc:],
+                subspace_full_occ_fb_vir_AOMO[:, : tot_nocc],
+                subspace_full_occ_fb_vir_AOMO[:, tot_nocc:],
+                logger,
+            )
+        else:
+            ovL_fb_occ_full_vir, voL_full_occ_fb_vir = eri_trans.eri_OVL_SIE_MP2(
+                low_level_info.mol_full,
+                low_level_info.auxmol,
+                subspace_fb_occ_full_vir_AOMO[:, : fb_nocc],
+                subspace_fb_occ_full_vir_AOMO[:, fb_nocc:],
+                subspace_full_occ_fb_vir_AOMO[:, : tot_nocc],
+                subspace_full_occ_fb_vir_AOMO[:, tot_nocc:],
+                low_level_info.j2c,
+                logger,
+                vhfopt=vhfopt,
+            )
     else:
         ovL_fb_occ_full_vir, voL_full_occ_fb_vir = eri_trans.eri_ondisk_OVL_SIE_MP2(
             low_level_info.mol_full,

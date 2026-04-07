@@ -44,6 +44,7 @@ class low_level_info:
                  with_eri=False,
                  oei=None,
                  local_orb_path=None,
+                 ewald_correct=False,
                  ):
 
         logger = LG.logger
@@ -52,15 +53,14 @@ class low_level_info:
         else:
             self.auxmol = df.addons.make_auxmol(mol, aux_basis)
 
-        self.mo_energy = mf.mo_energy.copy()
+        # self.mo_energy = mf.mo_energy.copy()
         self.mol_full = mol
 
         mempool = cupy.get_default_memory_pool()
         mempool.free_all_blocks()
 
         blksize = int((lib.gpu_avail_bytes() / (8 * 2)) ** (1 / 3))
-
-        if with_eri is False:
+        if with_eri is False and getattr(mol, 'pbc_intor', None) is None:
             self.j2c = os.path.join(LG.filepath + 'j2c')
             lib.free_all_blocks()
             with h5py.File(self.j2c, 'w') as f:
@@ -75,6 +75,14 @@ class low_level_info:
             self.j2c = None
 
         lib.free_all_blocks()
+
+        if getattr(mol, 'pbc_intor', None) is not None and ewald_correct:
+            from pyscf.pbc import tools
+            self.madelung = tools.madelung(mf.cell, mf.kpt)
+            self.ewald_correct = True
+            logger.info("----------- Using Ewald correction. The results may not be reliable.")
+        else:
+            self.ewald_correct = False
 
         t_localized = time.time()
 
@@ -132,6 +140,9 @@ class low_level_info:
 
         self.ao_ovlp = cupy.asarray(mf.get_ovlp(mol))
 
+        # Make sure the mo energy does not include the ewald correction
+        self.mo_energy = mf._eigh(self.low_scf_fock.get(), self.ao_ovlp.get())[0]
+
         if not numpy.isclose(reduce(numpy.dot, (self.AOLO.T,
                                                 self.ao_ovlp, self.AOLO)).sum(), mol.nao):
             logger.info(
@@ -173,4 +184,7 @@ class low_level_info:
 
         del mf
         if hasattr(self.auxmol, 'stdout'):
-            del self.auxmol.stdout
+            try:
+                del self.auxmol.stdout
+            except:
+                pass

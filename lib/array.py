@@ -364,6 +364,11 @@ def ptr2arr(para):
     Reconstruct a numpy.ndarray from a tuple of MemoryPointer, shape, dtype and strides. Used for multiprocessing.
     '''
     data, shape, dtype, strides = para
-    ptr = ctypes.cast(data, ctypes.POINTER(
-        numpy.ctypeslib.as_ctypes_type(dtype) * numpy.prod(shape)))
+    dtype = numpy.dtype(dtype)
+    shape = tuple(shape)
+    size = int(numpy.prod(shape))
+    if size == 0:
+        return numpy.ndarray(shape, dtype, strides=strides)
+    nbytes = size * dtype.itemsize
+    ptr = ctypes.cast(data, ctypes.POINTER(ctypes.c_byte * nbytes))
     return numpy.ndarray(shape, dtype, strides=strides, buffer=ptr.contents)

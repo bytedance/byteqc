@@ -20,6 +20,7 @@ from pyscf.lib import prange
 from pyscf import gto
 from byteqc.embyte.Tools.tool_lib import fix_orbital_sign
 from byteqc.embyte.ERI import eri_trans
+# from byteqc.embyte.ERI import eri_trans_gpu4pyscf as eri_trans_g
 from multiprocessing import Pool
 import numpy
 import cupyx
@@ -92,6 +93,9 @@ class GPU_MP2Solver():
         self.nocc = nocc
         self.nvir = (self.AOMO.shape[1] - nocc)
         self.AOMO = self.AOMO
+        self.ewald_correct = low_level_info.ewald_correct
+        if low_level_info.ewald_correct:
+            self.madelung = low_level_info.madelung
 
         lib.free_all_blocks()
         gc.collect()
@@ -102,16 +106,33 @@ class GPU_MP2Solver():
         '''
         if save_or_load:
             if self.eri_file is None:
-                self.eri_general = eri_trans.eri_high_level_solver_incore(
-                    low_level_info.mol_full,
-                    low_level_info.auxmol,
-                    self.AOMO[:, :self.nocc],
-                    self.AOMO[:, self.nocc:],
-                    low_level_info.j2c,
-                    self.Logger,
-                    solver_type='MP2',
-                    vhfopt=self.vhfopt3c,
-                    svd_tol=1e-4)
+                if getattr(low_level_info.mol_full, 'pbc_intor', None):
+                    try:
+                        from byteqc.embyte.ERI import eri_trans_gpu4pyscf as eri_trans_g
+                    except Exception as e:
+                        raise ImportError(
+                            "Please install gpu4pyscf to use this feature."
+                            " Alternatively, you can set cderi_path to a valid path."
+                        ) from e
+                    self.eri_general = eri_trans_g.eri_high_level_solver_incore(
+                        low_level_info.mol_full,
+                        low_level_info.auxmol,
+                        self.AOMO[:, :self.nocc],
+                        self.AOMO[:, self.nocc:],
+                        self.Logger,
+                        solver_type='MP2',
+                        svd_tol=1e-4)
+                else:
+                    self.eri_general = eri_trans.eri_high_level_solver_incore(
+                        low_level_info.mol_full,
+                        low_level_info.auxmol,
+                        self.AOMO[:, :self.nocc],
+                        self.AOMO[:, self.nocc:],
+                        low_level_info.j2c,
+                        self.Logger,
+                        solver_type='MP2',
+                        vhfopt=self.vhfopt3c,
+                        svd_tol=1e-4)
             else:
                 self.eri_general = eri_trans.eri_ondisk_high_level_solver_incore(
                     low_level_info.mol_full,
@@ -195,6 +216,8 @@ class GPU_MP2Solver():
         naux = ovL.shape[-1]
 
         occ_energy = self.orb_energy[: nocc]
+        if self.ewald_correct:
+            occ_energy -= self.madelung
         vir_energy = self.orb_energy[nocc:]
 
         avail_mem = lib.gpu_avail_bytes() / 8 - nfrag * nvir * naux * 2

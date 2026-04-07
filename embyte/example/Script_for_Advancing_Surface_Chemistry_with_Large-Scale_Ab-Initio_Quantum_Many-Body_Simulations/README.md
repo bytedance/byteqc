@@ -128,22 +128,22 @@ conda init --all
 Some common package will installed in the default virtual environment named `base` by following commands.
 ```bash
 conda install -y -c conda-forge \
-        python \
+        python=3.12.9 \
         "libblas=*=*mkl" \
-        openmpi \
-        flake8 \
-        autopep8 \
-        mpi4py \
-        pynvml \
+        openmpi=5.0.7 \
+        flake8=7.2.0 \
+        autopep8=2.3.2 \
+        mpi4py=4.0.3 \
+        pynvml=12.0.0 \
         numpy=1.26.4 \
-        h5py \
-        psutil \
+        h5py=3.13.0 \
+        psutil=7.0.0 \
         pyscf=2.5.0 \
-        scipy \
-        fastrlock \
-        nvmath-python \
-        pandas \
-        addict \
+        scipy=1.15.2 \
+        fastrlock=0.8.3 \
+        nvmath-python=0.3.0 \
+        pandas=2.2.3 \
+        addict=2.4.0 \
         git
 ```
 
