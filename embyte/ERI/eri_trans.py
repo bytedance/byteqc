@@ -32,6 +32,31 @@ import cupy
 cupy.cuda.set_pinned_memory_allocator(None)
 
 
+def _normalize_kpts(kpts):
+    if kpts is None:
+        return None
+    if hasattr(kpts, 'kpts'):
+        kpts = kpts.kpts
+    kpts = numpy.asarray(kpts, dtype=float)
+    if kpts.ndim != 2 or kpts.shape[1] != 3:
+        raise ValueError(f'Invalid kpts shape {kpts.shape}, expected (nkpts, 3)')
+    return kpts
+
+
+def _dispatch_periodic_backend(name, mol, auxmol, args, kpts=None, **kwargs):
+    kpts = _normalize_kpts(kpts)
+    try:
+        if kpts is None or len(kpts) <= 1:
+            from byteqc.embyte.ERI import eri_trans_gpu4pyscf as eri_trans_g
+            return getattr(eri_trans_g, name)(mol, auxmol, *args, **kwargs)
+        from byteqc.embyte.ERI import eri_trans_pbc_gpu4pyscf as eri_trans_k
+    except ImportError as e:
+        raise ImportError(
+            "Please install gpu4pyscf to use the periodic ERI transformation paths."
+        ) from e
+    return getattr(eri_trans_k, name)(mol, auxmol, *args, kpts=kpts, **kwargs)
+
+
 def generate_tmpfile_name():
     unique_name = str(uuid.uuid4())
     return unique_name
@@ -65,12 +90,23 @@ def get_j2c(logger, mol=None, auxmol=None, vhfopt3c=None,
 
 
 def eri_OVL_SIE_MP2(mol, auxmol, mo_coeff_occ1, mo_coeff_unocc1,
-                    mo_coeff_occ2, mo_coeff_unocc2, j2c, logger, vhfopt=None):
+                    mo_coeff_occ2, mo_coeff_unocc2, j2c, logger, vhfopt=None,
+                    kpts=None, **kwargs):
     '''
     On-the-flying calculate 2 cderis in shape of (nocc1, nvir1, naux)
     and (nvir2, nocc2, naux) corresponding to mo_coeff 1 and 2.
     The cderis are used in MP2 to generate BNOs.
     '''
+
+    if getattr(mol, 'pbc_intor', None) is not None:
+        return _dispatch_periodic_backend(
+            'eri_OVL_SIE_MP2',
+            mol,
+            auxmol,
+            (mo_coeff_occ1, mo_coeff_unocc1, mo_coeff_occ2, mo_coeff_unocc2, j2c, logger),
+            kpts=kpts,
+            **kwargs,
+        )
 
     mo_coeff_occ1 = cupy.asarray(mo_coeff_occ1)
     mo_coeff_occ2 = cupy.asarray(mo_coeff_occ2)
@@ -603,10 +639,23 @@ def read_async_PBC(j3c_type, filepath, sv, x_pointer, buf_tmp_pointer,
 
 
 def eri_high_level_solver_incore(mol, auxmol, mo_coeff_occ, mo_coeff_unocc,
-                                 j2c, logger, solver_type='MP2', vhfopt=None, svd_tol=1e-4):
+                                 j2c, logger, solver_type='MP2', vhfopt=None,
+                                 svd_tol=1e-4, kpts=None, **kwargs):
     '''
     On-the-flying generate cderi for cluster which is under high-level solver processing.
     '''
+    if getattr(mol, 'pbc_intor', None) is not None:
+        return _dispatch_periodic_backend(
+            'eri_high_level_solver_incore',
+            mol,
+            auxmol,
+            (mo_coeff_occ, mo_coeff_unocc, j2c, logger),
+            kpts=kpts,
+            solver_type=solver_type,
+            svd_tol=svd_tol,
+            **kwargs,
+        )
+
     mo_coeff_occ = cupy.asarray(mo_coeff_occ)
     mo_coeff_unocc = cupy.asarray(mo_coeff_unocc)
     nocc = mo_coeff_occ.shape[1]
@@ -1157,10 +1206,22 @@ def eri_ondisk_high_level_solver_incore(
 
 
 def eri_high_level_solver_incore_with_jk(
-        mol, auxmol, mo_coeff, j2c, logger, rdm1_core_coeff, vhfopt=None, svd_tol=1e-4):
+        mol, auxmol, mo_coeff, j2c, logger, rdm1_core_coeff, vhfopt=None,
+        svd_tol=1e-4, kpts=None, **kwargs):
     '''
     On-the-flying generate the cderi for CCSD, and obtain j and k at the meantime.
     '''
+    if getattr(mol, 'pbc_intor', None) is not None:
+        return _dispatch_periodic_backend(
+            'eri_high_level_solver_incore_with_jk',
+            mol,
+            auxmol,
+            (mo_coeff, j2c, logger, rdm1_core_coeff),
+            kpts=kpts,
+            svd_tol=svd_tol,
+            **kwargs,
+        )
+
     mo_coeff = cupy.asarray(mo_coeff)
     nmo = mo_coeff.shape[1]
     rdm1_core_coeff = cupy.asarray(rdm1_core_coeff)

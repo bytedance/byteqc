@@ -26,6 +26,21 @@ GBLKSIZE_2 = 1024 * 4
 KBLKSIZE_2 = 64
 
 
+def _validate_gamma_kpts(kpts):
+    if kpts is None:
+        return None
+    if hasattr(kpts, 'kpts'):
+        kpts = kpts.kpts
+    kpts = numpy.asarray(kpts, dtype=float)
+    if kpts.ndim != 2 or kpts.shape[1] != 3:
+        raise ValueError(f'Invalid kpts shape {kpts.shape}, expected (nkpts, 3)')
+    if len(kpts) > 1:
+        raise ValueError(
+            'eri_trans_gpu4pyscf only supports gamma-point inputs. '
+            'Use byteqc.embyte.ERI.eri_trans or eri_trans_pbc_gpu4pyscf for multi-k calculations.'
+        )
+    return kpts
+
 
 def _to_real_or_raise(arr, name, atol=1e-14, rtol=1e-10):
     """Convert an array to float64; raise if non-negligible imaginary part exists."""
@@ -61,6 +76,25 @@ def _sqrt_psd_eigs_or_raise(S, min_eig_allowed=-1e-10):
     return cupy.sqrt(S)
 
 
+def _fit_aux_ft_block(aux_coeff, auxG_cart_raw, buf, naux_cart):
+    if auxG_cart_raw.ndim != 2:
+        raise ValueError(
+            f"Unexpected ft_ao output ndim={auxG_cart_raw.ndim}, expected 2"
+        )
+    if auxG_cart_raw.shape[0] == naux_cart:
+        return lib.gemm(
+            aux_coeff, auxG_cart_raw, buf=buf, transa='T', transb='N'
+        )
+    if auxG_cart_raw.shape[1] == naux_cart:
+        return lib.gemm(
+            aux_coeff, auxG_cart_raw, buf=buf, transa='T', transb='H'
+        )
+    raise ValueError(
+        f"Unexpected ft_ao output shape {auxG_cart_raw.shape}; "
+        f"neither axis matches naux_cart={naux_cart}"
+    )
+
+
 def eri_OVL_SIE_MP2(
     cell,
     auxcell,
@@ -68,14 +102,27 @@ def eri_OVL_SIE_MP2(
     mo_coeff_j1,
     mo_coeff_i2,
     mo_coeff_j2,
-    logger,
+    *args,
     omega=None,
     linear_dep_threshold=LINEAR_DEP_THR,
     with_long_range=True,
     ao_pair_batch_size=AO_PAIR_BATCH_SIZE_1,
     Lblksize=KBLKSIZE_1,
     Gblksize=GBLKSIZE_1,
+    kpts=None,
+    **kwargs,
 ):
+    _validate_gamma_kpts(kpts)
+    if len(args) == 1:
+        j2c = None
+        logger = args[0]
+    elif len(args) == 2:
+        j2c, logger = args
+    else:
+        raise TypeError(
+            'eri_OVL_SIE_MP2 expects either (..., logger) or (..., j2c, logger)'
+        )
+    _ = j2c
     
     cupy.cuda.get_current_stream().synchronize()
     lib.free_all_blocks()
@@ -165,8 +212,8 @@ def eri_OVL_SIE_MP2(
                 order="C",
             )
 
-            auxG_fit_blk = lib.gemm(
-                aux_coeff0_c, auxG_cart_raw, buf=auxG_fit_buf, transa='T', transb='H'
+            auxG_fit_blk = _fit_aux_ft_block(
+                aux_coeff0_c, auxG_cart_raw, auxG_fit_buf, naux_cart
             )
             auxG_fit_blk *= coulG[g0:g1]
 
@@ -426,7 +473,7 @@ def eri_high_level_solver_incore(
     auxcell,
     mo_coeff_i,
     mo_coeff_j,
-    logger,
+    *args,
     solver_type='MP2',
     svd_tol=1e-4,
     omega=None,
@@ -435,7 +482,20 @@ def eri_high_level_solver_incore(
     ao_pair_batch_size=AO_PAIR_BATCH_SIZE_1,
     Lblksize=KBLKSIZE_1,
     Gblksize=GBLKSIZE_1,
+    kpts=None,
+    **kwargs,
 ):
+    _validate_gamma_kpts(kpts)
+    if len(args) == 1:
+        j2c = None
+        logger = args[0]
+    elif len(args) == 2:
+        j2c, logger = args
+    else:
+        raise TypeError(
+            'eri_high_level_solver_incore expects either (..., logger) or (..., j2c, logger)'
+        )
+    _ = j2c
     
     cupy.cuda.get_current_stream().synchronize()
     lib.free_all_blocks()
@@ -525,8 +585,8 @@ def eri_high_level_solver_incore(
                 order="C",
             )
 
-            auxG_fit_blk = lib.gemm(
-                aux_coeff0_c, auxG_cart_raw, buf=auxG_fit_buf, transa='T', transb='H'
+            auxG_fit_blk = _fit_aux_ft_block(
+                aux_coeff0_c, auxG_cart_raw, auxG_fit_buf, naux_cart
             )
             auxG_fit_blk *= coulG[g0:g1]
 
@@ -872,8 +932,7 @@ def eri_high_level_solver_incore_with_jk(
     cell,
     auxcell,
     mo_coeff,
-    logger,
-    rdm1_core_coeff,
+    *args,
     svd_tol=1e-4,
     omega=None,
     linear_dep_threshold=LINEAR_DEP_THR,
@@ -881,7 +940,21 @@ def eri_high_level_solver_incore_with_jk(
     ao_pair_batch_size=AO_PAIR_BATCH_SIZE_2,
     Lblksize=KBLKSIZE_2,
     Gblksize=GBLKSIZE_2,
+    kpts=None,
+    **kwargs,
 ):
+    _validate_gamma_kpts(kpts)
+    if len(args) == 2:
+        j2c = None
+        logger, rdm1_core_coeff = args
+    elif len(args) == 3:
+        j2c, logger, rdm1_core_coeff = args
+    else:
+        raise TypeError(
+            'eri_high_level_solver_incore_with_jk expects either '
+            '(..., logger, rdm1_core_coeff) or (..., j2c, logger, rdm1_core_coeff)'
+        )
+    _ = j2c
     
     cupy.cuda.get_current_stream().synchronize()
     lib.free_all_blocks()
@@ -977,8 +1050,8 @@ def eri_high_level_solver_incore_with_jk(
                 order="C",
             )
 
-            auxG_fit_blk = lib.gemm(
-                aux_coeff0_c, auxG_cart_raw, buf=auxG_fit_buf, transa='T', transb='H'
+            auxG_fit_blk = _fit_aux_ft_block(
+                aux_coeff0_c, auxG_cart_raw, auxG_fit_buf, naux_cart
             )
             auxG_fit_blk *= coulG[g0:g1]
 

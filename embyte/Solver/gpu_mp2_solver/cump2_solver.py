@@ -106,34 +106,21 @@ class GPU_MP2Solver():
         '''
         if save_or_load:
             if self.eri_file is None:
-                if getattr(low_level_info.mol_full, 'pbc_intor', None):
-                    try:
-                        from byteqc.embyte.ERI import eri_trans_gpu4pyscf as eri_trans_g
-                    except Exception as e:
-                        raise ImportError(
-                            "Please install gpu4pyscf to use this feature."
-                            " Alternatively, you can set cderi_path to a valid path."
-                        ) from e
-                    self.eri_general = eri_trans_g.eri_high_level_solver_incore(
-                        low_level_info.mol_full,
-                        low_level_info.auxmol,
-                        self.AOMO[:, :self.nocc],
-                        self.AOMO[:, self.nocc:],
-                        self.Logger,
-                        solver_type='MP2',
-                        svd_tol=1e-4)
-                else:
-                    self.eri_general = eri_trans.eri_high_level_solver_incore(
-                        low_level_info.mol_full,
-                        low_level_info.auxmol,
-                        self.AOMO[:, :self.nocc],
-                        self.AOMO[:, self.nocc:],
-                        low_level_info.j2c,
-                        self.Logger,
-                        solver_type='MP2',
-                        vhfopt=self.vhfopt3c,
-                        svd_tol=1e-4)
+                self.eri_general = eri_trans.eri_high_level_solver_incore(
+                    low_level_info.eri_mol,
+                    low_level_info.eri_auxmol,
+                    self.AOMO[:, :self.nocc],
+                    self.AOMO[:, self.nocc:],
+                    low_level_info.j2c,
+                    self.Logger,
+                    solver_type='MP2',
+                    vhfopt=self.vhfopt3c,
+                    svd_tol=1e-4,
+                    kpts=low_level_info.kpts)
             else:
+                if low_level_info.kpts is not None:
+                    raise NotImplementedError(
+                        'On-disk high-level ERI is not supported when kpts is provided')
                 self.eri_general = eri_trans.eri_ondisk_high_level_solver_incore(
                     low_level_info.mol_full,
                     self.eri_file,

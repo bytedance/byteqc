@@ -173,32 +173,16 @@ class GPU_CCSDSolver():
             if self.eri_file is None:
 
                 if rdm1_core.any():
-                    
-                    if getattr(low_level_info.mol_full, 'pbc_intor', None):
-                        try:
-                            from byteqc.embyte.ERI import eri_trans_gpu4pyscf as eri_trans_g
-                        except Exception as e:
-                            raise ImportError(
-                                "Please install gpu4pyscf to use this feature."
-                                " Alternatively, you can set cderi_path to a valid path."
-                            ) from e
-                        self.eri_general, j, k, = eri_trans_g.eri_high_level_solver_incore_with_jk(
-                            low_level_info.mol_full,
-                            low_level_info.auxmol,
-                            self.AOMO,
-                            self.Logger,
-                            rdm1_core_coeff,
-                            svd_tol=1e-4)
-                    else:
-                        self.eri_general, j, k, = eri_trans.eri_high_level_solver_incore_with_jk(
-                            low_level_info.mol_full,
-                            low_level_info.auxmol,
-                            self.AOMO,
-                            low_level_info.j2c,
-                            self.Logger,
-                            rdm1_core_coeff,
-                            vhfopt=self.vhfopt3c,
-                            svd_tol=1e-4)
+                    self.eri_general, j, k, = eri_trans.eri_high_level_solver_incore_with_jk(
+                        low_level_info.eri_mol,
+                        low_level_info.eri_auxmol,
+                        self.AOMO,
+                        low_level_info.j2c,
+                        self.Logger,
+                        rdm1_core_coeff,
+                        vhfopt=self.vhfopt3c,
+                        svd_tol=1e-4,
+                        kpts=low_level_info.kpts)
 
                     veff = cupy.asarray(j - 0.5 * k)
                     self.cluster_oei = reduce(
@@ -209,33 +193,17 @@ class GPU_CCSDSolver():
 
                 else:
 
-                    if getattr(low_level_info.mol_full, 'pbc_intor', None):
-                        try:
-                            from byteqc.embyte.ERI import eri_trans_gpu4pyscf as eri_trans_g
-                        except Exception as e:
-                            raise ImportError(
-                                "Please install gpu4pyscf to use this feature."
-                                " Alternatively, you can set cderi_path to a valid path."
-                            ) from e
-                        self.eri_general = eri_trans_g.eri_high_level_solver_incore(
-                            low_level_info.mol_full,
-                            low_level_info.auxmol,
-                            self.AOMO,
-                            self.AOMO,
-                            self.Logger,
-                            solver_type='CCSD',
-                            svd_tol=1e-4)
-                    else:
-                        self.eri_general = eri_trans.eri_high_level_solver_incore(
-                            low_level_info.mol_full,
-                            low_level_info.auxmol,
-                            self.AOMO,
-                            self.AOMO,
-                            low_level_info.j2c,
-                            self.Logger,
-                            solver_type='CCSD',
-                            vhfopt=self.vhfopt3c,
-                            svd_tol=1e-4)
+                    self.eri_general = eri_trans.eri_high_level_solver_incore(
+                        low_level_info.eri_mol,
+                        low_level_info.eri_auxmol,
+                        self.AOMO,
+                        self.AOMO,
+                        low_level_info.j2c,
+                        self.Logger,
+                        solver_type='CCSD',
+                        vhfopt=self.vhfopt3c,
+                        svd_tol=1e-4,
+                        kpts=low_level_info.kpts)
 
                     self.cluster_oei = cupy.asarray(low_level_info.oei_LO)
                     self.cluster_oei = reduce(
@@ -244,6 +212,9 @@ class GPU_CCSDSolver():
 
             else:
                 if rdm1_core.any():
+                    if low_level_info.kpts is not None:
+                        raise NotImplementedError(
+                            'On-disk JK route is not supported when kpts is provided')
 
                     self.eri_general, j, k = eri_trans.eri_ondisk_high_level_solver_incore_with_jk(
                         low_level_info.mol_full,
@@ -261,6 +232,9 @@ class GPU_CCSDSolver():
                     self.cluster_oei = self.cluster_oei.get(blocking=True)
 
                 else:
+                    if low_level_info.kpts is not None:
+                        raise NotImplementedError(
+                            'On-disk high-level ERI is not supported when kpts is provided')
 
                     self.eri_general = eri_trans.eri_ondisk_high_level_solver_incore(
                         low_level_info.mol_full,

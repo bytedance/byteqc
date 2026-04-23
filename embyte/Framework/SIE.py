@@ -100,6 +100,7 @@ class SIE_kernel:
         self.t2_y_buffer_pool_size = RDM_MEMORY_POOL_SIZE
         self.local_orb_path = None
         self.ewald_correct = False
+        self.kpts = None
 
     def simulate(self, molecule, mean_field, fragments):
 
@@ -116,6 +117,16 @@ class SIE_kernel:
 
         if type(fragments) is not list:
             raise ValueError
+        if self.kpts is not None and getattr(molecule, 'pbc_intor', None) is None:
+            raise ValueError('kpts is only supported for periodic systems')
+        if self.kpts is not None and self.RDM:
+            raise NotImplementedError('RDM route is not supported when kpts is provided')
+        if getattr(molecule, 'pbc_intor', None) is not None:
+            if self.jk_file is None or self.oei_file is None:
+                raise ValueError(
+                    'Periodic systems require explicit jk_file and oei_file. '
+                    'Internal JK/OEI generation is disabled to avoid mixed logic.'
+                )
 
         orb_list = []
         equivalent_list = []
@@ -235,12 +246,23 @@ class SIE_kernel:
                 self.LG.logger.info(
                     'check file path: %s' %
                     self.PR.recorder['HF_chkfile'])
-                from pyscf import scf
-                mean_field = scf.RHF(molecule)
-                mean_field.verbose = 4
                 try:
-                    mean_field.__dict__.update(scf.chkfile.load(
-                        self.PR.recorder['HF_chkfile'], 'scf'))
+                    if getattr(molecule, 'pbc_intor', None):
+                        from pyscf.pbc import scf as pbcscf
+                        if self.kpts is not None:
+                            mean_field = pbcscf.KRHF(
+                                molecule, kpts=numpy.asarray(self.kpts), exxdiv=None)
+                        else:
+                            mean_field = pbcscf.RHF(molecule, exxdiv=None)
+                        mean_field.verbose = 4
+                        mean_field.__dict__.update(pbcscf.chkfile.load(
+                            self.PR.recorder['HF_chkfile'], 'scf'))
+                    else:
+                        from pyscf import scf
+                        mean_field = scf.RHF(molecule)
+                        mean_field.verbose = 4
+                        mean_field.__dict__.update(scf.chkfile.load(
+                            self.PR.recorder['HF_chkfile'], 'scf'))
                     self.LG.logger.info(
                         '=== Load Check Point: load mean_field for full system')
                 except BaseException:
@@ -257,7 +279,11 @@ class SIE_kernel:
 
                     if getattr(molecule, 'pbc_intor', None):
                         from pyscf.pbc import scf as pbcscf
-                        mean_field = pbcscf.RHF(molecule, exxdiv=None)
+                        if self.kpts is not None:
+                            mean_field = pbcscf.KRHF(
+                                molecule, kpts=numpy.asarray(self.kpts), exxdiv=None)
+                        else:
+                            mean_field = pbcscf.RHF(molecule, exxdiv=None)
                         mean_field.verbose = 4
                         mean_field.__dict__.update(pbcscf.chkfile.load(
                             self.PR.recorder['HF_chkfile'], 'scf'))
@@ -281,35 +307,29 @@ class SIE_kernel:
                 '=== converged SCF energy = %s' %
                 mean_field.e_tot)
 
-            if self.PR.recorder['fragment_group']:
-                self.LG.logger.info(
-                    'Load fragment_group class from %s' %
-                    self.PR.recorder['fragment_group'])
-                fragment_group = self.PR.load_class(
-                    self.PR.recorder['fragment_group'])
-                self.fragment_group = fragment_group
-            else:
-                fragment_group = Fragment_group(molecule, fragments)
-                fragment_group.build()
-                self.fragment_group = fragment_group
-                self.fragment_group.gourp_pair(group_size=self.pair_group_size)
-                if self.PR.chk_point:
-                    self.PR.recorder['fragment_group'] = os.path.join(
-                        self.logfile, 'fragment_group.pkl')
-                    self.LG.logger.info(
-                        'save fragment_group class in %s' %
-                        self.PR.recorder['fragment_group'])
-                    self.PR.save_class(
-                        fragment_group, self.PR.recorder['fragment_group'])
-                    self.PR.save()
-
             if self.PR.recorder['low_level_info_class']:
                 self.LG.logger.info(
                     'Load low_level_info class from %s' %
                     self.PR.recorder['low_level_info_class'])
                 low_level_info = self.PR.load_class(
                     self.PR.recorder['low_level_info_class'])
-                low_level_info.mol_full = molecule
+                if self.kpts is None:
+                    low_level_info.mol_full = molecule
+                else:
+                    from pyscf.pbc.tools import k2gamma as pbc_k2gamma
+                    from byteqc.embyte.Tools import k2gamma as gpu_k2gamma
+                    if getattr(low_level_info, 'kmesh', None) is None:
+                        low_level_info.kmesh = numpy.asarray(
+                            pbc_k2gamma.kpts_to_kmesh(
+                                molecule, numpy.asarray(self.kpts)),
+                            dtype=int,
+                        )
+                    
+                    from pyscf.pbc import tools
+                    low_level_info.mol_full = tools.super_cell(
+                        molecule, low_level_info.kmesh, wrap_around=False)
+                    # low_level_info.mol_full = pbc_k2gamma.k2gamma(
+                    #     mean_field, kmesh=low_level_info.kmesh).cell
                 try:
                     del low_level_info.mol_full.stdout
                 except:
@@ -317,7 +337,7 @@ class SIE_kernel:
                 self.low_level_info = low_level_info
 
             else:
-                self.LG.logger.info('=== buld low_level_info class')
+                self.LG.logger.info('=== build low_level_info class')
                 low_level_info = low_level_process.low_level_info(molecule,
                                                                   mean_field,
                                                                   self.LG,
@@ -327,6 +347,7 @@ class SIE_kernel:
                                                                   oei=self.oei_file,
                                                                   local_orb_path=self.local_orb_path,
                                                                   ewald_correct=self.ewald_correct,
+                                                                  kpts=self.kpts,
                                                                   )
                 if hasattr(low_level_info.mol_full, 'stdout'):
                     try:
@@ -357,6 +378,7 @@ class SIE_kernel:
                 self.PR.recorder['nocc_nvir_full'] = [
                     int(nocc_full), int(nvir_full)]
                 self.PR.save()
+
                 del Fock_MO
 
                 if self.PR.chk_point:
@@ -368,6 +390,29 @@ class SIE_kernel:
 
                     self.PR.save_class(
                         low_level_info, self.PR.recorder['low_level_info_class'])
+                    self.PR.save()
+
+            if self.PR.recorder['fragment_group']:
+                self.LG.logger.info(
+                    'Load fragment_group class from %s' %
+                    self.PR.recorder['fragment_group'])
+                fragment_group = self.PR.load_class(
+                    self.PR.recorder['fragment_group'])
+                self.fragment_group = fragment_group
+
+            else:
+                fragment_group = Fragment_group(molecule, fragments)
+                fragment_group.build()
+                self.fragment_group = fragment_group
+                self.fragment_group.gourp_pair(group_size=self.pair_group_size)
+                if self.PR.chk_point:
+                    self.PR.recorder['fragment_group'] = os.path.join(
+                        self.logfile, 'fragment_group.pkl')
+                    self.LG.logger.info(
+                        'save fragment_group class in %s' %
+                        self.PR.recorder['fragment_group'])
+                    self.PR.save_class(
+                        fragment_group, self.PR.recorder['fragment_group'])
                     self.PR.save()
             self.nocc_full = self.PR.recorder['nocc_nvir_full'][0]
             self.nvir_full = self.PR.recorder['nocc_nvir_full'][1]

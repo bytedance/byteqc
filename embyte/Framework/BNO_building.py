@@ -95,37 +95,21 @@ def SIE_BNO_builder(low_level_info, fb_size_list, LOEO,
     gc.collect()
 
     if eri is None:
-        if getattr(low_level_info.mol_full, 'pbc_intor', None):
-            try:
-                from byteqc.embyte.ERI import eri_trans_gpu4pyscf as eri_trans_g
-            except Exception as e:
-                raise ImportError(
-                    "Please install gpu4pyscf to use this feature."
-                    " Alternatively, you can set cderi_path to a valid path."
-                ) from e
-
-            ovL_fb_occ_full_vir, voL_full_occ_fb_vir = eri_trans_g.eri_OVL_SIE_MP2(
-                low_level_info.mol_full,
-                low_level_info.auxmol,
-                subspace_fb_occ_full_vir_AOMO[:, : fb_nocc],
-                subspace_fb_occ_full_vir_AOMO[:, fb_nocc:],
-                subspace_full_occ_fb_vir_AOMO[:, : tot_nocc],
-                subspace_full_occ_fb_vir_AOMO[:, tot_nocc:],
-                logger,
-            )
-        else:
-            ovL_fb_occ_full_vir, voL_full_occ_fb_vir = eri_trans.eri_OVL_SIE_MP2(
-                low_level_info.mol_full,
-                low_level_info.auxmol,
-                subspace_fb_occ_full_vir_AOMO[:, : fb_nocc],
-                subspace_fb_occ_full_vir_AOMO[:, fb_nocc:],
-                subspace_full_occ_fb_vir_AOMO[:, : tot_nocc],
-                subspace_full_occ_fb_vir_AOMO[:, tot_nocc:],
-                low_level_info.j2c,
-                logger,
-                vhfopt=vhfopt,
-            )
+        ovL_fb_occ_full_vir, voL_full_occ_fb_vir = eri_trans.eri_OVL_SIE_MP2(
+            low_level_info.eri_mol,
+            low_level_info.eri_auxmol,
+            subspace_fb_occ_full_vir_AOMO[:, : fb_nocc],
+            subspace_fb_occ_full_vir_AOMO[:, fb_nocc:],
+            subspace_full_occ_fb_vir_AOMO[:, : tot_nocc],
+            subspace_full_occ_fb_vir_AOMO[:, tot_nocc:],
+            low_level_info.j2c,
+            logger,
+            vhfopt=vhfopt,
+            kpts=low_level_info.kpts,
+        )
     else:
+        if low_level_info.kpts is not None:
+            raise NotImplementedError('On-disk ovL build is not supported when kpts is provided')
         ovL_fb_occ_full_vir, voL_full_occ_fb_vir = eri_trans.eri_ondisk_OVL_SIE_MP2(
             low_level_info.mol_full,
             eri,

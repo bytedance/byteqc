@@ -358,6 +358,21 @@ class high_level_processing:
                 # pool_rw.close()
                 # pool_rw.join()
                 file.close()
+                t1_path = self.PR.filepath + '/th_%s/' % th_str + 't1'
+                try:
+                    t1_h = high_level_solver_frag.t1.asnumpy()
+                except BaseException:
+                    t1_h = high_level_solver_frag.t1
+
+                def save_amp(amp_path, amp_name, amp, logger):
+                    with h5py.File(amp_path, 'w') as f:
+                        f.create_dataset(
+                            amp_name, dtype='float64', shape=amp.shape)
+                        f[amp_name].write_direct(amp)
+                    logger.info(f'Finish saving {amp_name}')
+
+                save_amp(t1_path, 't1', t1_h, self.LG.logger)
+
 
             if self.RDM and not self.PR.recorder['solver_finish'][th_index]:
 
