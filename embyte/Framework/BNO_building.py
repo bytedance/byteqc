@@ -47,9 +47,6 @@ def SIE_BNO_builder(low_level_info, fb_size_list, LOEO,
     fb_n_electron = numpy.sum(EO_occupation[fb_list])
     fb_nocc = int(fb_n_electron // 2)
 
-    # if low_level_info.ewald_correct:
-    #     fb_mo_energy[ : fb_nocc] -= low_level_info.madelung
-
 
     tot_nocc = int(low_level_info.mol_full.nelectron // 2)
 
@@ -68,23 +65,28 @@ def SIE_BNO_builder(low_level_info, fb_size_list, LOEO,
     LO_fb_MO_vir = LO_fb_MO[:, fb_MO_vir_list].copy()
     fb_EO_fb_MO = fock_fb_EO = LO_fb_EO = LO_fb_MO = None
 
+    lomo_cpu = low_level_info.LOMO
     subspace_fb_occ_full_vir_LOMO = cupy.hstack(
-        (LO_fb_MO_occ, cupy.asarray(low_level_info.LOMO[:, tot_nocc:])))
+        (LO_fb_MO_occ, cupy.asarray(lomo_cpu[:, tot_nocc:])))
     subspace_full_occ_fb_vir_LOMO = cupy.hstack(
-        (cupy.asarray(low_level_info.LOMO[:, : tot_nocc]), LO_fb_MO_vir))
+        (cupy.asarray(lomo_cpu[:, : tot_nocc]), LO_fb_MO_vir))
     subspace_fb_occ_full_vir_mo_energy = list(
         fb_mo_energy.get()[: fb_nocc]) + list(low_level_info.mo_energy[tot_nocc:])
     subspace_full_occ_fb_vir_mo_energy = list(
         low_level_info.mo_energy[: tot_nocc]) + list(fb_mo_energy.get()[fb_nocc:])
+    del lomo_cpu
+    LO_fb_MO_occ = LO_fb_MO_vir = None
 
+    aolo_gpu = cupy.asarray(low_level_info.AOLO)
     subspace_fb_occ_full_vir_AOMO = cupy.dot(
-        low_level_info.AOLO,
+        aolo_gpu,
         subspace_fb_occ_full_vir_LOMO).get(
         blocking=True)
     subspace_full_occ_fb_vir_AOMO = cupy.dot(
-        low_level_info.AOLO,
+        aolo_gpu,
         subspace_full_occ_fb_vir_LOMO).get(
         blocking=True)
+    del aolo_gpu
 
     subspace_fb_occ_full_vir_LOMO = subspace_fb_occ_full_vir_LOMO.get(
         blocking=True)

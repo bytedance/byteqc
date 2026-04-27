@@ -129,7 +129,7 @@ class high_level_processing:
             self.LG.logger.info('= Get bath and embedding orbitals cccupation')
             LOEO, EO_occupation, frag_bath_size, frag_bath_nelectron = Get_bath(
                 self.low_level_info.mol_full, frag_bath_size, frag_orb_index,
-                self.low_level_info.onerdm_low)
+                self.low_level_info.onerdm_low, self.LG.logger)
             self.LG.logger.info(
                 '= Get bath and embedding orbitals cccupation Done!')
 
@@ -143,45 +143,36 @@ class high_level_processing:
 
             norb_fb = frag_bath_size[0] + frag_bath_size[1]
 
-            init_cluster_fock = cupy.asarray(reduce(
-                cupy.dot, (LOEO[:, :norb_fb].T, self.low_level_info.fock_LO, LOEO[:, :norb_fb])))
-            _, init_cluster_mo_coeff = cupy.linalg.eigh(
-                init_cluster_fock)
-            init_cluster_mo_coeff = fix_orbital_sign(init_cluster_mo_coeff)
             init_cluster_nele = round(
                 self.low_level_info.mol_full.nelectron - numpy.sum(EO_occupation))
 
-            del init_cluster_fock
-
             self.LG.logger.info(
                 '=== Start to build BNO')
-
-            LOEO = cupy.asarray(LOEO)
-            LO_init_cluster_MO = cupy.dot(
-                LOEO[:, :norb_fb], init_cluster_mo_coeff)
-            self.cluster_mo_coeff = init_cluster_mo_coeff.copy()
-            LO_init_cluster_MO = cupy.hstack(
-                (LO_init_cluster_MO, LOEO[:, norb_fb:]))
 
             EO_occupation = numpy.asarray(EO_occupation)
 
             EO_occupation[: round(init_cluster_nele // 2)] = 2
 
             cluster_list = list(range(norb_fb))
-            LOBNO = LOEO.copy()
             ele_diff = []
 
             if cheat_th is not None:
                 threshold_cluster = cheat_th
             else:
                 threshold_cluster = self.threshold
+            
+            lib.free_all_blocks()
+            gc.collect()
 
-            LOBNO, ele_diff = SIE_BNO_builder(self.low_level_info, frag_bath_size, LOEO.get(
-            ), EO_occupation, vhfopt=self.vhfopt, logger=self.LG.logger, eri=self.eri)
+            LOBNO, ele_diff = SIE_BNO_builder(self.low_level_info, frag_bath_size, LOEO,
+                                             EO_occupation, vhfopt=self.vhfopt, logger=self.LG.logger, eri=self.eri)
             LOEO = None
             LOBNO = cupy.asarray(LOBNO)
 
-            del LO_init_cluster_MO, threshold_cluster
+            lib.free_all_blocks()
+            gc.collect()
+
+            del threshold_cluster
 
             new_index = (-numpy.array(ele_diff)).argsort()
             LOBNO[:, norb_fb:] = LOBNO[:, norb_fb:][:, new_index]
@@ -190,13 +181,10 @@ class high_level_processing:
             EO_occupation = list(EO_occupation[:norb_fb]) + list(
                 numpy.array(EO_occupation[norb_fb:])[new_index])
 
-            del init_cluster_mo_coeff
-
             self.PR.save_obj(LOBNO, 'LOBNO')
             self.PR.save_obj(ele_diff, 'ele_diff')
             self.PR.save_obj(EO_occupation, 'EO_occupation')
             self.PR.save_obj(cluster_list, 'cluster_list')
-            self.PR.save_obj(self.cluster_mo_coeff, 'mf_fb_mo_coeff')
             self.PR.save_obj(frag_bath_size, 'frag_bath_size')
             self.PR.recorder['norb_fb'] = str(norb_fb)
             self.PR.recorder['stage']['0'] = True
@@ -226,8 +214,6 @@ class high_level_processing:
                 self.PR.recorder['EO_occupation'])
             cluster_list = self.PR.load_class(self.PR.recorder['cluster_list'])
             norb_fb = int(self.PR.recorder['norb_fb'])
-            self.cluster_mo_coeff = self.PR.load_class(
-                self.PR.recorder['mf_fb_mo_coeff'])
             self.LG.logger.info(
                 '=== Load Check point: Selection for extension bath')
 
@@ -456,8 +442,8 @@ class high_level_processing:
 
                 for equi_frag_ind in self.equi_frag:
                     frag_equi_op = self.fragments[equi_frag_ind]['equivalent_operator']
-                    AOLO = self.low_level_info.AOLO.get().copy()
-                    LOMO = self.low_level_info.LOMO.copy()
+                    AOLO = self.low_level_info.AOLO
+                    LOMO = self.low_level_info.LOMO
                     LO_BNO_clu = LOBNO[:, cluster_list].get()
                     AOMO = numpy.dot(AOLO, LOMO)
                     AO_BNO_clu = numpy.dot(AOLO, LO_BNO_clu)
@@ -507,7 +493,7 @@ class high_level_processing:
                             AO_MO_occ.T),
                             cupy.asarray(S),
                             cupy.asarray(AO_FRAG))).get()
-
+                    AOLO = cupy.asarray(AOLO)
                     LO_CLU_occ = reduce(
                         cupy.dot,
                         (cupy.asarray(

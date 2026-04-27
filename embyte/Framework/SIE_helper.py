@@ -20,7 +20,7 @@ import cupy
 cupy.cuda.set_pinned_memory_allocator(None)
 
 
-def Get_bath(mol, fb_size_list, frag_list, rdm1_low):
+def Get_bath(mol, fb_size_list, frag_list, rdm1_low, logger):
     '''
     Calculate bath based on given framgment orbitals.
     '''
@@ -39,8 +39,15 @@ def Get_bath(mol, fb_size_list, frag_list, rdm1_low):
 
     norb_bath = numpy.sum(-numpy.maximum(-occupation_env,
                           occupation_env - 2.0)[new_ind] > 1e-8)
-    assert norb_bath < fb_size_list[0] or numpy.isclose(norb_bath, fb_size_list[0]), \
-        f'bath orbitals number : {norb_bath}, fragment orbitals number : {fb_size_list[0]}, where bath size > fragment size.'
+    if norb_bath > fb_size_list[0]:
+        logger.info(f'bath orbitals number : {norb_bath}, fragment orbitals number : {fb_size_list[0]}, where bath size > fragment size with the therehold of 1e-8.')
+        logger.info(f'Use fragment orbitals number as bath size.')
+        index_tmp = -numpy.maximum(-occupation_env,
+                                occupation_env - 2.0)[new_ind] > 1e-8
+        occ_env = (-numpy.maximum(-occupation_env,
+                                occupation_env - 2.0)[new_ind])[index_tmp]
+        logger.info(f'Occupation of bath orbitals : {occ_env}')
+        norb_bath = fb_size_list[0]
     fb_size_list.append(int(norb_bath))
     occupation_env = occupation_env[new_ind]
     coeff_env = coeff_env[:, new_ind]

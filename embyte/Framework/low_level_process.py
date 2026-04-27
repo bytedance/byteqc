@@ -18,8 +18,8 @@ import os
 import time
 from byteqc import lib
 from byteqc.embyte.Localization import iao_pao_localization
-from byteqc.embyte.Tools.tool_lib import fix_orbital_sign
 from functools import reduce
+from multiprocessing import Pool
 import numpy
 from byteqc.embyte.ERI import eri_trans
 from byteqc.cuobc import scf
@@ -49,25 +49,83 @@ def _kpts_match(kpts_ref, kpts_given, tol=1e-9):
         kpts_ref, kpts_given, atol=tol, rtol=0.0)
 
 
-def _load_or_transform_pbc_ao_matrix(data_or_path, cell, kpts, kmesh, nao_sc, label):
-    from pyscf.pbc.tools import k2gamma as pbc_k2gamma
+def _load_or_transform_pbc_ao_matrix(data_or_path, cell, kpts, kmesh, nao_sc, label, cache=None):
+    from byteqc.embyte.Tools import k2gamma as pbc_k2gamma
 
     if isinstance(data_or_path, str):
-        arr = numpy.load(data_or_path)
+        arr = numpy.load(data_or_path, mmap_mode='r')
     else:
         arr = numpy.asarray(data_or_path)
 
     nkpts = len(kpts)
     nao = int(cell.nao_nr())
     if arr.shape == (nao_sc, nao_sc):
+        if numpy.iscomplexobj(arr):
+            if numpy.max(numpy.abs(arr.imag)) > 1e-8:
+                raise ValueError(f'{label} is complex with non-negligible imaginary part')
+            arr = arr.real
         return numpy.asarray(arr, dtype=numpy.float64)
     if arr.shape == (nkpts, nao, nao):
         return pbc_k2gamma.to_supercell_ao_integrals(
-            cell, kpts, arr, kmesh=kmesh, force_real=True)
+            cell, kpts, arr, kmesh=kmesh, force_real=True, cache=cache)
     raise ValueError(
         f'{label} has incompatible shape {arr.shape}; '
         f'expected either ({nao_sc}, {nao_sc}) or ({nkpts}, {nao}, {nao})'
     )
+
+
+def _fix_orbital_sign_gpu(mo_coeff):
+    absmax = cupy.argmax(cupy.abs(mo_coeff), axis=0)
+    cols = cupy.arange(mo_coeff.shape[1])
+    signs = cupy.where(mo_coeff[absmax, cols] < 0, -1.0, 1.0)
+    mo_coeff *= signs[None, :]
+    return mo_coeff
+
+
+def _free_gpu_memory():
+    cupy.cuda.get_current_stream().synchronize()
+    lib.free_all_blocks()
+    cupy.get_default_memory_pool().free_all_blocks()
+    cupy.get_default_pinned_memory_pool().free_all_blocks()
+
+
+def _as_float64_cpu(arr):
+    arr = numpy.asarray(arr)
+    if numpy.iscomplexobj(arr):
+        if numpy.max(numpy.abs(arr.imag)) > 1e-8:
+            raise ValueError('Cannot silently discard non-negligible imaginary part')
+        arr = arr.real
+    return numpy.asarray(arr, dtype=numpy.float64, order='C')
+
+
+def _ao_matrix_to_lo_cpu(ao_mat_cpu, aolo_gpu):
+    ao_mat_gpu = cupy.asarray(_as_float64_cpu(ao_mat_cpu))
+    tmp = cupy.dot(ao_mat_gpu, aolo_gpu)
+    lo_mat = cupy.dot(aolo_gpu.T, tmp).get()
+    del ao_mat_gpu, tmp
+    _free_gpu_memory()
+    return lo_mat
+
+
+def _remove_mf_ewald_shift(mo_energy, mo_occ, madelung):
+    mo_energy = numpy.asarray(mo_energy, dtype=numpy.float64).copy()
+    mo_occ = numpy.asarray(mo_occ)
+    mo_energy[mo_occ > 0] += madelung
+    return mo_energy
+
+
+_LOW_LEVEL_MATRIX_ATTRS = (
+    'AOLO',
+    'onerdm_low_ao',
+    'low_scf_fock',
+    'ao_ovlp',
+    'LOMO',
+    # 'AOMO',
+    'onerdm_low',
+    'oei_LO',
+    'fock_LO',
+    'MOLO',
+)
 
 
 class low_level_info:
@@ -76,6 +134,113 @@ class low_level_info:
     Commonly the mean field comes from the converged HF check file which is provided by pyscf.
     The low-level calculation would not be done in SIE workflow.
     '''
+
+    def __getattribute__(self, name):
+        if not name.startswith('_'):
+            try:
+                disk_arrays = object.__getattribute__(self, '_disk_arrays')
+            except AttributeError:
+                disk_arrays = None
+            if disk_arrays is not None and name in disk_arrays:
+                return object.__getattribute__(self, '_load_disk_matrix')(name)
+        return object.__getattribute__(self, name)
+
+    def _init_disk_matrix_store(self, disk_matrix_file):
+        self._disk_matrix_file = disk_matrix_file
+        self._disk_arrays = {}
+        if disk_matrix_file is None:
+            return
+        dirname = os.path.dirname(disk_matrix_file)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
+        with lib.FileMp(disk_matrix_file, 'w'):
+            pass
+
+    def _matrix_file_block_size(self, shape):
+        nproc = max(int(getattr(lib, 'NumFileProcess', 1)), 1)
+        return (max(int((shape[0] + nproc - 1) // nproc), 1),)
+
+    def _write_matrix_to_disk(self, filemp, name, arr):
+        is_gpu_array = isinstance(arr, cupy.ndarray)
+        if is_gpu_array:
+            arr_cpu = cupy.asnumpy(arr)
+        else:
+            arr_cpu = numpy.asarray(arr)
+        if arr_cpu.ndim != 2:
+            return False
+        arr_cpu = numpy.asarray(arr_cpu, order='C')
+        if name in filemp:
+            del filemp[name]
+        dataset = filemp.create_dataset(
+            name,
+            shape=arr_cpu.shape,
+            dtype=arr_cpu.dtype,
+            blksizes=self._matrix_file_block_size(arr_cpu.shape),
+        )
+        pool = Pool(processes=lib.NumFileProcess)
+        try:
+            waits = dataset.setitem(numpy.s_[:], arr_cpu, pool=pool)
+            for wait in waits:
+                wait.wait()
+        finally:
+            pool.close()
+            pool.join()
+        self._disk_arrays[name] = {
+            'path': self._disk_matrix_file,
+            'dataset': name,
+            'shape': tuple(arr_cpu.shape),
+            'dtype': numpy.dtype(arr_cpu.dtype).str,
+            'as_gpu': False,
+        }
+        del arr_cpu
+        return True
+
+    def _offload_low_level_matrices(self):
+        if self._disk_matrix_file is None:
+            return
+        offloaded = []
+        with lib.FileMp(self._disk_matrix_file, 'a') as filemp:
+            for name in _LOW_LEVEL_MATRIX_ATTRS:
+                if name not in self.__dict__:
+                    continue
+                arr = self.__dict__[name]
+                if arr is None or not hasattr(arr, 'ndim') or arr.ndim != 2:
+                    continue
+                if self._write_matrix_to_disk(filemp, name, arr):
+                    del self.__dict__[name]
+                    offloaded.append(name)
+        if offloaded:
+            _free_gpu_memory()
+
+    def _offload_matrix_attr(self, name):
+        if self._disk_matrix_file is None or name not in self.__dict__:
+            return
+        arr = self.__dict__[name]
+        if arr is None or not hasattr(arr, 'ndim') or arr.ndim != 2:
+            return
+        with lib.FileMp(self._disk_matrix_file, 'a') as filemp:
+            if self._write_matrix_to_disk(filemp, name, arr):
+                del self.__dict__[name]
+                _free_gpu_memory()
+
+    def _load_disk_matrix(self, name):
+        import cupyx
+
+        meta = self._disk_arrays[name]
+        shape = tuple(meta['shape'])
+        dtype = numpy.dtype(meta['dtype'])
+        buf = cupyx.empty_pinned(shape, dtype=dtype)
+        with lib.FileMp(meta['path'], 'r') as filemp:
+            dataset = filemp[meta['dataset']]
+            pool = Pool(processes=lib.NumFileProcess)
+            try:
+                arr = dataset.getitem(numpy.s_[:], pool=pool, buf=buf)
+                arr.wait()
+            finally:
+                pool.close()
+                pool.join()
+        arr_cpu = numpy.asarray(buf)
+        return arr_cpu
 
     def __init__(self, mol,
                  mf,
@@ -87,9 +252,14 @@ class low_level_info:
                  local_orb_path=None,
                  ewald_correct=False,
                  kpts=None,
+                 mf_with_ewald=None,
+                 disk_matrix_file=None,
                  ):
 
         logger = LG.logger
+        if disk_matrix_file is None:
+            disk_matrix_file = os.path.join(LG.filepath, 'low_level_info_matrices.h5')
+        self._init_disk_matrix_store(disk_matrix_file)
         primitive_mol = mol
         primitive_mf = mf
         self.kpts = _normalize_kpts(kpts)
@@ -108,7 +278,6 @@ class low_level_info:
                 )
 
         if getattr(primitive_mol, 'pbc_intor', None) is not None and self.kpts is not None:
-            from pyscf.pbc.tools import k2gamma as pbc_k2gamma
             from byteqc.embyte.Tools import k2gamma as gpu_k2gamma
 
             if loaded_kpts is None:
@@ -121,7 +290,7 @@ class low_level_info:
                 )
 
             self.kmesh = numpy.asarray(
-                pbc_k2gamma.kpts_to_kmesh(primitive_mol, self.kpts),
+                gpu_k2gamma.kpts_to_kmesh(primitive_mol, self.kpts),
                 dtype=int,
             )
             mf = gpu_k2gamma.k2gamma(primitive_mf, kmesh=self.kmesh)
@@ -137,6 +306,11 @@ class low_level_info:
             if jk_file is None or oei is None:
                 raise ValueError(
                     'Periodic systems require both jk_file and oei to be provided explicitly.'
+                )
+            if mf_with_ewald is None:
+                raise ValueError(
+                    'Periodic low_level_info requires mf_with_ewald=True/False because '
+                    'external JK/OEI are assumed to be generated without Ewald exxdiv.'
                 )
 
         if aux_basis is None:
@@ -194,25 +368,28 @@ class low_level_info:
             self.AOLO = cupy.asarray(numpy.load(local_orb_path))
         else:
             logger.info("----------- Using IAO+PAO localizer")
-            self.AOLO = fix_orbital_sign(iao_pao_localization(mol, mf))
+            self.AOLO = _fix_orbital_sign_gpu(iao_pao_localization(mol, mf))
 
         logger.info(
             '----------- localization_function time cost is %s' %
             (time.time() - t_localized))
 
         self.low_scf_energy = mf.e_tot
-        mf_mo_coeff = cupy.asarray(mf.mo_coeff)
-        low_scf_dm = reduce(
-            cupy.dot,
-            (
-                mf_mo_coeff,
-                cupy.diag(cupy.asarray(mf.mo_occ)),
-                mf_mo_coeff.T
-            )
-        )
-
-        self.onerdm_low_ao = low_scf_dm.get()
+        mf_mo_occ = numpy.asarray(mf.mo_occ)
+        oei_ao_cpu = None
+        low_scf_fock_cpu = None
+        ao_ovlp_cpu = None
+        pbc_lo_mats_done = False
         if self.kpts is None:
+            mf_mo_coeff = cupy.asarray(mf.mo_coeff)
+            mf.mo_coeff = None
+            occ_idx = mf_mo_occ > 0
+            occ_coeff = mf_mo_coeff[:, occ_idx] * cupy.sqrt(
+                cupy.asarray(mf_mo_occ[occ_idx]))[None, :]
+            low_scf_dm = cupy.dot(occ_coeff, occ_coeff.T)
+            del occ_coeff
+            self.onerdm_low_ao = low_scf_dm.get()
+            self._offload_matrix_attr('onerdm_low_ao')
             if getattr(mol, 'pbc_intor', None) is None:
                 if jk_file is None:
                     blksize = int((lib.gpu_avail_bytes() / (8 * 2)) ** (1 / 4))
@@ -244,76 +421,131 @@ class low_level_info:
                 self.low_scf_fock = cupy.asarray(
                     numpy.load(oei) + low_scf_twoint.get())
 
+            del low_scf_dm
             self.ao_ovlp = cupy.asarray(mf.get_ovlp(mol))
         else:
-            from pyscf.pbc.tools import k2gamma as pbc_k2gamma
+            from byteqc.embyte.Tools import k2gamma as pbc_k2gamma
 
             nao_sc = int(self.mol_full.nao_nr())
+            pbc_cache = pbc_k2gamma.build_k2gamma_cache(
+                primitive_mol, self.kpts, kmesh=self.kmesh)
             low_scf_dm_k = numpy.asarray(primitive_mf.make_rdm1())
             self.onerdm_low_ao = pbc_k2gamma.to_supercell_ao_integrals(
-                primitive_mol, self.kpts, low_scf_dm_k, kmesh=self.kmesh, force_real=True)
+                primitive_mol, self.kpts, low_scf_dm_k, kmesh=self.kmesh,
+                force_real=True, cache=pbc_cache)
+            del low_scf_dm_k
+            self._offload_matrix_attr('onerdm_low_ao')
 
             logger.info('----------- load JK from %s and transform it to gamma supercell' % jk_file)
-            low_scf_twoint = cupy.asarray(
-                _load_or_transform_pbc_ao_matrix(
-                    jk_file, primitive_mol, self.kpts, self.kmesh, nao_sc, 'jk_file'
-                )
+            jk_ao_cpu = _load_or_transform_pbc_ao_matrix(
+                jk_file, primitive_mol, self.kpts, self.kmesh, nao_sc, 'jk_file',
+                cache=pbc_cache
             )
-
-            self.low_scf_fock = cupy.asarray(
-                _load_or_transform_pbc_ao_matrix(
-                    oei, primitive_mol, self.kpts, self.kmesh, nao_sc, 'oei'
-                ) + low_scf_twoint.get()
+            oei_ao_cpu = _load_or_transform_pbc_ao_matrix(
+                oei, primitive_mol, self.kpts, self.kmesh, nao_sc, 'oei',
+                cache=pbc_cache
             )
+            low_scf_fock_cpu = numpy.array(jk_ao_cpu, dtype=numpy.float64, order='C', copy=True)
+            low_scf_fock_cpu += oei_ao_cpu
+            del jk_ao_cpu
+            low_scf_twoint = None
+            self.oei_LO = _ao_matrix_to_lo_cpu(oei_ao_cpu, self.AOLO)
+            self._offload_matrix_attr('oei_LO')
+            del oei_ao_cpu
+            self.fock_LO = _ao_matrix_to_lo_cpu(low_scf_fock_cpu, self.AOLO)
+            self._offload_matrix_attr('fock_LO')
+            self.low_scf_fock = low_scf_fock_cpu
+            self._offload_matrix_attr('low_scf_fock')
+            del low_scf_fock_cpu
+            pbc_lo_mats_done = True
 
             s_k = numpy.asarray(primitive_mf.get_ovlp(primitive_mol))
-            self.ao_ovlp = cupy.asarray(
-                pbc_k2gamma.to_supercell_ao_integrals(
-                    primitive_mol, self.kpts, s_k, kmesh=self.kmesh, force_real=True
-                )
+            ao_ovlp_cpu = pbc_k2gamma.to_supercell_ao_integrals(
+                primitive_mol, self.kpts, s_k, kmesh=self.kmesh,
+                force_real=True, cache=pbc_cache
             )
+            del s_k, pbc_cache
+            self.ao_ovlp = cupy.asarray(ao_ovlp_cpu)
+            mf_mo_coeff = cupy.asarray(numpy.asarray(mf.mo_coeff, dtype=numpy.float64))
+            mf.mo_coeff = None
+            _free_gpu_memory()
 
-        # Make sure the mo energy does not include the ewald correction
-        self.mo_energy = mf._eigh(self.low_scf_fock.get(), self.ao_ovlp.get())[0]
+        # Multi-k supercells are too large for a full gamma Fock diagonalization.
+        # The k2gamma mean-field already carries the k-sorted orbital energies.
+        from byteqc.embyte.Tools import k2gamma as pbc_k2gamma
+        if self.kpts is None:
+            self.mo_energy = pbc_k2gamma.gpu_generalized_eigvalsh(
+                self.low_scf_fock, self.ao_ovlp, logger=logger)
+        else:
+            self.mo_energy = numpy.asarray(mf.mo_energy, dtype=numpy.float64).copy()
+            if mf_with_ewald:
+                from pyscf.pbc import tools
+                madelung_mf = tools.madelung(primitive_mol, self.kpts)
+                self.mo_energy = _remove_mf_ewald_shift(
+                    self.mo_energy, mf_mo_occ, madelung_mf)
+                logger.info(
+                    '----------- Remove Ewald occupied-orbital shift from mf.mo_energy: +%s',
+                    madelung_mf)
 
-        if not numpy.isclose(reduce(numpy.dot, (self.AOLO.T,
-                                                self.ao_ovlp, self.AOLO)).sum(), mol.nao):
-            logger.info(
-                f'+++ localized orbitals may not orthogonal!')
+        if mol.nao < 8000:
+            ovlp_sum = reduce(cupy.dot, (self.AOLO.T,
+                                         self.ao_ovlp, self.AOLO)).sum().get()
+            if not numpy.isclose(ovlp_sum, mol.nao):
+                logger.info(
+                    f'+++ localized orbitals may not orthogonal!')
+        else:
+            logger.info('----------- skip full AOLO orthogonality check for large system')
 
-        self.LOMO = reduce(
-            cupy.dot, (self.AOLO.T, self.ao_ovlp, mf_mo_coeff))
-        self.LOMO = cupy.asarray(fix_orbital_sign(self.LOMO.get()))
-        self.onerdm_low = reduce(
-            cupy.dot,
-            (self.LOMO,
-             cupy.diag(
-                 cupy.asarray(
-                     mf.mo_occ)),
-                self.LOMO.T)).get()
+        s_mo = cupy.dot(self.ao_ovlp, mf_mo_coeff)
+        self.LOMO = cupy.dot(self.AOLO.T, s_mo)
+        del s_mo
+        self.LOMO = _fix_orbital_sign_gpu(self.LOMO)
+        occ_idx = mf_mo_occ > 0
+        lomo_occ = self.LOMO[:, occ_idx] * cupy.sqrt(
+            cupy.asarray(mf_mo_occ[occ_idx]))[None, :]
+        self.onerdm_low = cupy.dot(lomo_occ, lomo_occ.T).get()
+        del lomo_occ
+        self._offload_matrix_attr('onerdm_low')
+        self.LOMO = self.LOMO.get()
+        # self.AOMO = mf_mo_coeff.get()
+        # self._offload_matrix_attr('AOMO')
+        del mf_mo_coeff
+        if self.kpts is not None:
+            del self.ao_ovlp
+            self.ao_ovlp = ao_ovlp_cpu
+            self._offload_matrix_attr('ao_ovlp')
+            del ao_ovlp_cpu
+        else:
+            self.ao_ovlp = self.ao_ovlp.get()
+            self._offload_matrix_attr('ao_ovlp')
+        _free_gpu_memory()
 
         self.core_constant_energy = mf.mol.energy_nuc()
-        self.oei_LO = reduce(
-            cupy.dot,
-            (self.AOLO.T,
-             self.low_scf_fock
-             - low_scf_twoint,
-             self.AOLO)).get()
-        self.fock_LO = reduce(
-            cupy.dot,
-            (self.AOLO.T,
-             self.low_scf_fock,
-             self.AOLO)).get()
-        self.low_scf_fock = self.low_scf_fock.get()
-        self.MOLO = reduce(cupy.dot, (mf_mo_coeff.T, self.ao_ovlp, self.AOLO))
-        self.ao_ovlp = self.ao_ovlp.get()
-        self.LOMO = self.LOMO.get()
-        self.AOMO = mf_mo_coeff.get()
-        del mf_mo_coeff
+        if self.kpts is None:
+            self.oei_LO = reduce(
+                cupy.dot,
+                (self.AOLO.T,
+                 self.low_scf_fock
+                 - low_scf_twoint,
+                 self.AOLO)).get()
+            self.fock_LO = reduce(
+                cupy.dot,
+                (self.AOLO.T,
+                 self.low_scf_fock,
+                 self.AOLO)).get()
+            self.low_scf_fock = self.low_scf_fock.get()
+        else:
+            if not pbc_lo_mats_done:
+                self.oei_LO = _ao_matrix_to_lo_cpu(oei_ao_cpu, self.AOLO)
+                del oei_ao_cpu
+                self.fock_LO = _ao_matrix_to_lo_cpu(low_scf_fock_cpu, self.AOLO)
+                self.low_scf_fock = low_scf_fock_cpu
+                del low_scf_fock_cpu
 
         self.num_occ = int(mol.nelectron / 2)
+        self.MOLO = self.LOMO.conj().T
 
-        self.MOLO = self.MOLO.get()
+        self._offload_low_level_matrices()
 
         del mf
         if hasattr(self.auxmol, 'stdout'):

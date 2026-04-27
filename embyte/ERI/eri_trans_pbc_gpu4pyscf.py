@@ -21,12 +21,12 @@ from gpu4pyscf.pbc.tools.k2gamma import kpts_to_kmesh
 from gpu4pyscf.pbc.tools.pbc import _Gv_wrap_around, get_coulG
 
 
-AO_PAIR_BATCH_SIZE_1 = 256 * 256
+AO_PAIR_BATCH_SIZE_1 = 128 * 128
 GBLKSIZE_1 = 1024 * 4
-KBLKSIZE_1 = 64
-AO_PAIR_BATCH_SIZE_2 = 256 * 256
+KBLKSIZE_1 = 16
+AO_PAIR_BATCH_SIZE_2 = 128 * 128
 GBLKSIZE_2 = 1024 * 4
-KBLKSIZE_2 = 64
+KBLKSIZE_2 = 16
 IMAG_TOL = 1e-10
 DEFAULT_SVD_COMPRESS_AUX = 20000
 
@@ -639,7 +639,8 @@ def eri_OVL_SIE_MP2(
         kmesh = _to_numpy_array(kmesh, dtype=int)
     if int(np.prod(kmesh)) != nkpts:
         raise ValueError(f"kmesh {tuple(kmesh)} is incompatible with {nkpts} k-points")
-
+    # import ipdb
+    # ipdb.set_trace()
     coeff_i1_k = _gamma_ao_to_k_coeff(cell, kpts, mo_coeff_i1, kmesh, wrap_around=wrap_around)
     coeff_j1_k = _gamma_ao_to_k_coeff(cell, kpts, mo_coeff_j1, kmesh, wrap_around=wrap_around)
     coeff_i2_k = _gamma_ao_to_k_coeff(cell, kpts, mo_coeff_i2, kmesh, wrap_around=wrap_around)

@@ -183,7 +183,7 @@ class GPU_MP2Solver():
         orb_energy, EOMO = cupy.linalg.eigh(Fock_clu)
         EOMO = fix_orbital_sign(EOMO)
         LOMO = cupy.dot(LOEO, EOMO)
-        AOMO = cupy.dot(low_level_info.AOLO, LOMO)
+        AOMO = cupy.dot(cupy.asarray(low_level_info.AOLO), LOMO)
 
         return LOEO, orb_energy, EOMO, LOMO, AOMO
 

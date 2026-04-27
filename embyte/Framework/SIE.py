@@ -100,6 +100,7 @@ class SIE_kernel:
         self.t2_y_buffer_pool_size = RDM_MEMORY_POOL_SIZE
         self.local_orb_path = None
         self.ewald_correct = False
+        self.mf_with_ewald = None
         self.kpts = None
 
     def simulate(self, molecule, mean_field, fragments):
@@ -126,6 +127,12 @@ class SIE_kernel:
                 raise ValueError(
                     'Periodic systems require explicit jk_file and oei_file. '
                     'Internal JK/OEI generation is disabled to avoid mixed logic.'
+                )
+            if self.mf_with_ewald is None:
+                raise ValueError(
+                    'For periodic SIE, please set SIE_class.mf_with_ewald to True or False. '
+                    'Use True if the loaded mean-field mo_energy contains PySCF exxdiv="ewald" '
+                    'occupied-orbital shifts; use False otherwise.'
                 )
 
         orb_list = []
@@ -348,6 +355,10 @@ class SIE_kernel:
                                                                   local_orb_path=self.local_orb_path,
                                                                   ewald_correct=self.ewald_correct,
                                                                   kpts=self.kpts,
+                                                                  mf_with_ewald=self.mf_with_ewald,
+                                                                  disk_matrix_file=os.path.join(
+                                                                      self.PR.filepath,
+                                                                      'low_level_info_matrices.h5'),
                                                                   )
                 if hasattr(low_level_info.mol_full, 'stdout'):
                     try:
@@ -357,11 +368,13 @@ class SIE_kernel:
                 del mean_field
                 self.low_level_info = low_level_info
 
+                low_level_lomo = low_level_info.LOMO
+                low_level_fock_lo = low_level_info.fock_LO
                 Fock_MO = reduce(
                     cupy.dot, (cupy.asarray(
-                        low_level_info.LOMO.T), cupy.asarray(
-                        low_level_info.fock_LO), cupy.asarray(
-                        low_level_info.LOMO))).get()
+                        low_level_lomo.T), cupy.asarray(
+                        low_level_fock_lo), cupy.asarray(
+                        low_level_lomo))).get()
                 numpy.save(
                     os.path.join(
                         self.PR.filepath,
@@ -370,16 +383,16 @@ class SIE_kernel:
                 assert numpy.isclose(low_level_info.mol_full.nelectron % 2, 0)
                 nocc_full = round(low_level_info.mol_full.nelectron // 2)
                 if not numpy.isclose(low_level_info.mol_full.nao - nocc_full,
-                                     low_level_info.LOMO.shape[1] - nocc_full):
+                                     low_level_lomo.shape[1] - nocc_full):
                     self.LG.logger.info(
-                        f'The MO has been cut from {low_level_info.mol_full.nao} to {low_level_info.LOMO.shape[1]}.'
+                        f'The MO has been cut from {low_level_info.mol_full.nao} to {low_level_lomo.shape[1]}.'
                         f' It may related to the linear dependency of the basis.')
-                nvir_full = low_level_info.LOMO.shape[1] - nocc_full
+                nvir_full = low_level_lomo.shape[1] - nocc_full
                 self.PR.recorder['nocc_nvir_full'] = [
                     int(nocc_full), int(nvir_full)]
                 self.PR.save()
 
-                del Fock_MO
+                del Fock_MO, low_level_lomo, low_level_fock_lo
 
                 if self.PR.chk_point:
                     self.PR.recorder['low_level_info_class'] = os.path.join(
@@ -1194,6 +1207,15 @@ class SIE_kernel:
 
                 try:
                     os.remove(self.PR.recorder['low_level_info_class'])
+                except BaseException:
+                    pass
+
+                try:
+                    os.remove(os.path.join(self.PR.filepath, 'low_level_info_matrices.h5'))
+                except BaseException:
+                    pass
+                try:
+                    shutil.rmtree(os.path.join(self.PR.filepath, 'low_level_info_matrices_Mp'))
                 except BaseException:
                     pass
 
