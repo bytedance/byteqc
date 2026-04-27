@@ -17,7 +17,7 @@ mol.atom = [
     [8 , (-6.31504583, -6.96366310, -2.72627950)],
     [1 , (-5.79312801, -6.26504898, -2.37597966)],
     [1 , (-7.14357233, -6.71134567, -2.32921052)]]
-basis_set = ['sto-3g','cc-pvdz','cc-pvtz','cc-pvqz']
+basis_set = ['sto-3g','cc-pvdz','cc-pvtz']
 for basis in basis_set:
     mol.basis = basis
     mol.build()
