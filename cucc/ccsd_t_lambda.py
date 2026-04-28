@@ -45,7 +45,7 @@ from pyscf.lib import logger, prange, direct_sum
 from pyscf.cc.ccsd import BLKMIN
 from byteqc import lib
 import numba
-from time import time
+import concurrent.futures
 
 # generate the [off:off+n] indices for [a,b,c] with a >= b >= c with n the length of output.
 gen_abc = cupy.ElementwiseKernel(
@@ -423,9 +423,7 @@ def make_intermediates(mycc, t1, t2, eris):
         naux = eris.ovvv.l1.shape[0]
         unit_occ += naux * nocc * 2
         unit_occ += naux * nocc * nocc + naux * nvir
-
     blksize = min(nabc, int(memory / 8 / unit_occ))
-    print("Blksize = ",blksize)
 
     # allocate memory for intermediate tensors 
     buf = lib.ArrayBuffer(pool.empty((blksize * unit_occ + 10 * 1024), 'f8'))
@@ -437,6 +435,8 @@ def make_intermediates(mycc, t1, t2, eris):
     bufleft = buf.left()
     cpu_buf1 = lib.empty((blksize, nocc, nocc, nvir), 'f8',type=1) # pinned memory
     cpu_buf2 = lib.empty((blksize, nocc, nocc), 'f8',type=1) # pinned memory
+    cpu_buf1_asy = lib.empty((blksize, nocc, nocc, nvir), 'f8',type=1) # pinned memory
+    cpu_buf2_asy = lib.empty((blksize, nocc, nocc), 'f8',type=1) # pinned memory
     # p6 permutation for slicing (a,b,c)
     inds = numpy.asarray([[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1],[2, 1, 0]])
     modes = numpy.asarray(["nijk", "nikj", "njik", "nkij", "njki", "nkji"])
@@ -611,36 +611,30 @@ def make_intermediates(mycc, t1, t2, eris):
             as_r6(w,r,'nijk','nkji','nikj') # (v1,v2,v3) = (A,B,C); r = 2W(A,B,C) - W(C,B,A) - W(A,C,B)
             lib.contraction('nk',fs,'nijk',r,'nij',bufk)
             bufk.get(out=cpu_bufk,blocking=True)
-            #numpy.add.at(k,(slice(None),slice(None),cpu_a,cpu_b),cpu_bufk.transpose(1,2,0))
             fast_scatter_add_k(k, cpu_a, cpu_b, cpu_bufk)
             as_r6(w,r,'njik','njki','nkij') # (v1,v2,v3) = (B,A,C), r = 2W(B,A,C) - W(C,A,B) - W(B,C,A)
             lib.contraction('nk',fs,'nijk',r,'nij',bufk)
             bufk.get(out=cpu_bufk,blocking=True)
-            #numpy.add.at(k,(slice(None),slice(None),cpu_b,cpu_a),cpu_bufk.transpose(1,2,0))
             fast_scatter_add_k(k, cpu_b, cpu_a, cpu_bufk)
 
             take01(nocc,nvir,b,fov,fs)
             as_r6(w,r,'nikj','nkij','nijk') # (v1,v2,v3) = (A,C,B), r = 2W(A,C,B) - W(B,C,A) - W(A,B,C)
             lib.contraction('nk',fs,'nijk',r,'nij',bufk)
             bufk.get(out=cpu_bufk,blocking=True)
-            #numpy.add.at(k,(slice(None),slice(None),cpu_a,cpu_c),cpu_bufk.transpose(1,2,0))
             fast_scatter_add_k(k, cpu_a, cpu_c, cpu_bufk)
             as_r6(w,r,'njki','njik','nkji') # (v1,v2,v3) = (C,A,B), r = 2W(C,A,B) - W(B,A,C) - W(C,B,A)
             lib.contraction('nk',fs,'nijk',r,'nij',bufk)
             bufk.get(out=cpu_bufk,blocking=True)
-            #numpy.add.at(k,(slice(None),slice(None),cpu_c,cpu_a),cpu_bufk.transpose(1,2,0))
             fast_scatter_add_k(k, cpu_c, cpu_a, cpu_bufk)
             
             take01(nocc,nvir,a,fov,fs)
             as_r6(w,r,'nkij','nikj','njik') # (v1,v2,v3) = (B,C,A), r = 2W(B,C,A) - W(A,C,B) - W(B,A,C)
             lib.contraction('nk',fs,'nijk',r,'nij',bufk)
             bufk.get(out=cpu_bufk,blocking=True)
-            #numpy.add.at(k,(slice(None),slice(None),cpu_b,cpu_c),cpu_bufk.transpose(1,2,0))
             fast_scatter_add_k(k, cpu_b, cpu_c, cpu_bufk)
             as_r6(w,r,'nkji','nijk','njki') # (v1,v2,v3) = (C,B,A), r = 2W(C,B,A) - W(A,B,C) - W(C,A,B))
             lib.contraction('nk',fs,'nijk',r,'nij',bufk)
             bufk.get(out=cpu_bufk,blocking=True)
-            #numpy.add.at(k,(slice(None),slice(None),cpu_c,cpu_b),cpu_bufk.transpose(1,2,0))
             fast_scatter_add_k(k, cpu_c, cpu_b, cpu_bufk)
             return
         
@@ -699,8 +693,9 @@ def make_intermediates(mycc, t1, t2, eris):
         m = buf1[:n]
         # Buffer allocation now: buf1 -> m; buf2 -> z
 
-        def add_j(abc,j,cpu_bufj1,cpu_bufj2):
+        def add_j(abc,j,cpu_bufj1,cpu_bufj2,cpu_bufj1_asy,cpu_bufj2_asy):
             a,b,c = abc[0],abc[1],abc[2]
+            n = len(a)
             cpu_a = cupy.asnumpy(a)
             cpu_b = cupy.asnumpy(b)
             cpu_c = cupy.asnumpy(c)
@@ -718,74 +713,78 @@ def make_intermediates(mycc, t1, t2, eris):
                 naux = ovvv.l1.shape[0]
                 lov = tmpbuf.empty((n, naux, nocc), 'f8')
                 lvv = tmpbuf.empty((n, naux, nvir), 'f8')
+            
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            task_tracker = {} 
+            def dispatch_j1(cpu_buf, idx_c):
+                if id(cpu_buf) in task_tracker:
+                   task_tracker[id(cpu_buf)].result() 
+                bufj1.get(out=cpu_buf, blocking=True)
+                task_tracker[id(cpu_buf)] = executor.submit(fast_scatter_add_j1, j, idx_c, cpu_buf)
+            def dispatch_k(cpu_buf, idx_c1, idx_c2):
+                if id(cpu_buf) in task_tracker:
+                   task_tracker[id(cpu_buf)].result()
+                bufj2.get(out=cpu_buf, blocking=True)
+                task_tracker[id(cpu_buf)] = executor.submit(fast_scatter_add_k, j, idx_c1, idx_c2, cpu_buf)
 
             # (a_n,b_n,c_n) = (v1,e,f)(ijk)
             as_r6(z,m,'nijk','nkji','nikj')
             take_ovoo(eri_ovoo,c,lov_ovoo,lpq)
             take_ovvv(eri_ovvv,c,b,lov,lvv)
             lib.contraction('nkv',eri_ovvv,'nijk',m,'nijv',bufj1)
-            bufj1.get(out=cpu_bufj1,blocking=True)
-            fast_scatter_add_j1(j, cpu_a, cpu_bufj1)
+            dispatch_j1(cpu_bufj1, cpu_a)
             lib.contraction('nkjl',eri_ovoo,'nijk',m,'nil',bufj2,alpha=-1.0)
-            bufj2.get(out=cpu_bufj2,blocking=True)
-            fast_scatter_add_k(j, cpu_a, cpu_b, cpu_bufj2)
+            dispatch_k(cpu_bufj2, cpu_a, cpu_b)
             
             # (a_n,b_n,c_n) = (e,v1,f)(jik)
             as_r6(z,m,'njik','njki','nkij')
             take_ovvv(eri_ovvv,c,a,lov,lvv)
             lib.contraction('nkv',eri_ovvv,'nijk',m,'nijv',bufj1)
-            bufj1.get(out=cpu_bufj1,blocking=True)
-            fast_scatter_add_j1(j, cpu_b, cpu_bufj1)
+            dispatch_j1(cpu_bufj1_asy, cpu_b)
             lib.contraction('nkjl',eri_ovoo,'nijk',m,'nil',bufj2,alpha=-1.0)
-            bufj2.get(out=cpu_bufj2,blocking=True) 
-            fast_scatter_add_k(j, cpu_b, cpu_a, cpu_bufj2)
+            dispatch_k(cpu_bufj2_asy, cpu_b, cpu_a)
 
             # (a_n,b_n,c_n) = (v1,f,e)(ikj)
             as_r6(z,m,'nikj','nkij','nijk')
             take_ovoo(eri_ovoo,b,lov_ovoo,lpq)
             take_ovvv(eri_ovvv,b,c,lov,lvv)
             lib.contraction('nkv',eri_ovvv,'nijk',m,'nijv',bufj1)
-            bufj1.get(out=cpu_bufj1,blocking=True)
-            fast_scatter_add_j1(j, cpu_a, cpu_bufj1)
+            dispatch_j1(cpu_bufj1, cpu_a)
             lib.contraction('nkjl',eri_ovoo,'nijk',m,'nil',bufj2,alpha=-1.0)
-            bufj2.get(out=cpu_bufj2,blocking=True)
-            fast_scatter_add_k(j, cpu_a, cpu_c, cpu_bufj2)
+            dispatch_k(cpu_bufj2, cpu_a, cpu_c)
 
             # (a_n,b_n,c_n) = (e,f,v1)(jki)
             as_r6(z,m,'njki','njik','nkji')
             take_ovvv(eri_ovvv,b,a,lov,lvv)
             lib.contraction('nkv',eri_ovvv,'nijk',m,'nijv',bufj1)
-            bufj1.get(out=cpu_bufj1,blocking=True)
-            fast_scatter_add_j1(j, cpu_c, cpu_bufj1)
+            dispatch_j1(cpu_bufj1_asy, cpu_c)
             lib.contraction('nkjl',eri_ovoo,'nijk',m,'nil',bufj2,alpha=-1.0)
-            bufj2.get(out=cpu_bufj2,blocking=True)
-            fast_scatter_add_k(j, cpu_c, cpu_a, cpu_bufj2)
+            dispatch_k(cpu_bufj2_asy, cpu_c, cpu_a)
 
             # (a_n,b_n,c_n) = (f,v1,e)(kij)
             as_r6(z,m,'nkij','nikj','njik')
             take_ovoo(eri_ovoo,a,lov_ovoo,lpq)
             take_ovvv(eri_ovvv,a,c,lov,lvv)
             lib.contraction('nkv',eri_ovvv,'nijk',m,'nijv',bufj1)
-            bufj1.get(out=cpu_bufj1,blocking=True)
-            fast_scatter_add_j1(j, cpu_b, cpu_bufj1)
+            dispatch_j1(cpu_bufj1, cpu_b)
             lib.contraction('nkjl',eri_ovoo,'nijk',m,'nil',bufj2,alpha=-1.0)
-            bufj2.get(out=cpu_bufj2,blocking=True)
-            fast_scatter_add_k(j, cpu_b, cpu_c, cpu_bufj2)
+            dispatch_k(cpu_bufj2, cpu_b, cpu_c)
 
             # (a_n,b_n,c_n) = (f,e,v1)(kji)
             as_r6(z,m,'nkji','nijk','njki')
             take_ovvv(eri_ovvv,a,b,lov,lvv)
             lib.contraction('nkv',eri_ovvv,'nijk',m,'nijv',bufj1)
-            bufj1.get(out=cpu_bufj1,blocking=True)
-            fast_scatter_add_j1(j, cpu_c, cpu_bufj1)
+            dispatch_j1(cpu_bufj1_asy, cpu_c)
             lib.contraction('nkjl',eri_ovoo,'nijk',m,'nil',bufj2,alpha=-1.0)
-            bufj2.get(out=cpu_bufj2,blocking=True)
-            fast_scatter_add_k(j, cpu_c, cpu_b, cpu_bufj2)
-            
+            dispatch_k(cpu_bufj2_asy, cpu_c, cpu_b)
+
+            for future in task_tracker.values():
+                future.result()
+            executor.shutdown()
             lov_ovoo = lpq = lov = lvv = None
             return
         
-        add_j(abc,joovv,cpu_buf1[:n],cpu_buf2[:n])
+        add_j(abc,joovv,cpu_buf1[:n],cpu_buf2[:n],cpu_buf1_asy[:n],cpu_buf2_asy[:n])
         m = z = bufz = None
 
     # calculate l2_t
