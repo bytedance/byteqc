@@ -81,7 +81,7 @@ class GPU_MP2Solver():
 
         nocc = round(nelec_high // 2)
 
-        LOEO, self.orb_energy, self.EOMO, self.LOMO, self.AOMO = self.get_coeff(
+        self.orb_energy, self.EOMO, self.AOMO = self.get_coeff(
             LOBNO, cluster_list, low_level_info)
         self.projector = self.EOMO[:, :nocc].T[:, :nfrag].copy()
         mol_frag = gto.Mole()
@@ -92,7 +92,6 @@ class GPU_MP2Solver():
 
         self.nocc = nocc
         self.nvir = (self.AOMO.shape[1] - nocc)
-        self.AOMO = self.AOMO
         self.ewald_correct = low_level_info.ewald_correct
         if low_level_info.ewald_correct:
             self.madelung = low_level_info.madelung
@@ -170,14 +169,14 @@ class GPU_MP2Solver():
 
     def get_cluster_coeff(self):
 
-        return self.EOMO, self.LOMO
+        return self.EOMO
 
     def get_coeff(self, LOBNO, cluster_list, low_level_info):
         LOEO = cupy.asarray(LOBNO[:, cluster_list])
         Fock_clu = cupy.einsum(
             'ip, jq, ij -> pq',
-            cupy.asarray(LOEO),
-            cupy.asarray(LOEO),
+            LOEO,
+            LOEO,
             cupy.asarray(
                 low_level_info.fock_LO))
         orb_energy, EOMO = cupy.linalg.eigh(Fock_clu)
@@ -185,7 +184,7 @@ class GPU_MP2Solver():
         LOMO = cupy.dot(LOEO, EOMO)
         AOMO = cupy.dot(cupy.asarray(low_level_info.AOLO), LOMO)
 
-        return LOEO, orb_energy, EOMO, LOMO, AOMO
+        return orb_energy, EOMO, AOMO
 
     def kernel(self):
         # Here kernel only for sync the code sturcture for CC

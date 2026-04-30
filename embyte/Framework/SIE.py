@@ -607,7 +607,6 @@ class SIE_kernel:
                     high_level_frag.vhfopt = vhfopt
 
                 for equi_ind, part_list in enumerate(equi_part):
-
                     if self.PR.recorder['Cluster'][equi_ind]:
                         self.LG.logger.info(
                             '--- The cluster %s has already be solved! ---' %

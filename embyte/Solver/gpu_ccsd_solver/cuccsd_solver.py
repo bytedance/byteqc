@@ -170,11 +170,13 @@ class GPU_CCSDSolver():
         AOLO = None
         lib.free_all_blocks()
         rdm1_core = reduce(cupy.dot, (rdm1_core_coeff, rdm1_core_coeff.T))
+        rdm1_core_coeff = rdm1_core_coeff.get(blocking=True)
 
         if save_or_load:
             if self.eri_file is None:
 
                 if rdm1_core.any():
+                    rdm1_core = None
                     self.eri_general, j, k, = eri_trans.eri_high_level_solver_incore_with_jk(
                         low_level_info.eri_mol,
                         low_level_info.eri_auxmol,
@@ -194,7 +196,7 @@ class GPU_CCSDSolver():
                     self.cluster_oei = self.cluster_oei.get(blocking=True)
 
                 else:
-
+                    rdm1_core = None
                     self.eri_general = eri_trans.eri_high_level_solver_incore(
                         low_level_info.eri_mol,
                         low_level_info.eri_auxmol,
@@ -214,6 +216,7 @@ class GPU_CCSDSolver():
 
             else:
                 if rdm1_core.any():
+                    rdm1_core = None
                     if low_level_info.kpts is not None:
                         raise NotImplementedError(
                             'On-disk JK route is not supported when kpts is provided')
@@ -234,6 +237,7 @@ class GPU_CCSDSolver():
                     self.cluster_oei = self.cluster_oei.get(blocking=True)
 
                 else:
+                    rdm1_core = None
                     if low_level_info.kpts is not None:
                         raise NotImplementedError(
                             'On-disk high-level ERI is not supported when kpts is provided')
@@ -303,7 +307,7 @@ class GPU_CCSDSolver():
 
     def get_cluster_coeff(self):
 
-        return self.EOMO, self.LOMO
+        return self.EOMO
 
     def kernel(self):
 
@@ -353,11 +357,11 @@ class GPU_CCSDSolver():
         assert self.cc_fragment.converged
 
     def get_coeff(self, LOBNO, cluster_list, low_level_info):
-        LOEO = LOBNO[:, cluster_list]
+        LOEO = cupy.asarray(LOBNO[:, cluster_list])
         Fock_clu = cupy.einsum(
             'ip, jq, ij -> pq',
-            cupy.asarray(LOEO),
-            cupy.asarray(LOEO),
+            LOEO,
+            LOEO,
             cupy.asarray(low_level_info.fock_LO))
         orb_energy, EOMO = cupy.linalg.eigh(Fock_clu)
         EOMO = fix_orbital_sign(EOMO)

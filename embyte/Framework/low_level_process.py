@@ -114,6 +114,189 @@ def _remove_mf_ewald_shift(mo_energy, mo_occ, madelung):
     return mo_energy
 
 
+def _env_flag(name, default='0'):
+    return bool(int(os.environ.get(name, default)))
+
+
+def _sample_indices(n, nsample):
+    n = int(n)
+    nsample = max(0, min(int(nsample), n))
+    if nsample == 0:
+        return numpy.empty(0, dtype=numpy.int64)
+    if nsample == n:
+        return numpy.arange(n, dtype=numpy.int64)
+    return numpy.unique(numpy.linspace(0, n - 1, nsample, dtype=numpy.int64))
+
+
+def _metric_deviation(metric, target_diag=1.0):
+    metric = numpy.asarray(metric)
+    diag = numpy.diag(metric)
+    offdiag = metric.copy()
+    offdiag[numpy.diag_indices_from(offdiag)] = 0.0
+    target = numpy.asarray(target_diag, dtype=diag.dtype)
+    if target.ndim == 0:
+        diag_err = numpy.max(numpy.abs(diag - target.item())) if diag.size else 0.0
+    else:
+        diag_err = numpy.max(numpy.abs(diag - target)) if diag.size else 0.0
+    offdiag_err = numpy.max(numpy.abs(offdiag)) if offdiag.size else 0.0
+    return float(max(diag_err, offdiag_err)), float(diag_err), float(offdiag_err)
+
+
+def _log_orth_check(logger, label, err, diag_err, offdiag_err, tol):
+    msg = (
+        f'----------- {label}: sampled metric max_err={err:.3e}, '
+        f'diag_err={diag_err:.3e}, offdiag_err={offdiag_err:.3e}, tol={tol:.3e}'
+    )
+    if err > tol:
+        logger.warning(msg)
+    else:
+        logger.info(msg)
+
+
+def _sample_s_metric_check_gpu(logger, label, coeff, ovlp, nsample, tol):
+    idx = _sample_indices(coeff.shape[1], nsample)
+    if idx.size == 0:
+        return
+    coeff_sample = cupy.ascontiguousarray(coeff[:, idx])
+    s_coeff = cupy.dot(ovlp, coeff_sample)
+    metric = cupy.dot(coeff_sample.T.conj(), s_coeff).get()
+    del coeff_sample, s_coeff
+    _free_gpu_memory()
+    err, diag_err, offdiag_err = _metric_deviation(metric, 1.0)
+    _log_orth_check(logger, label, err, diag_err, offdiag_err, tol)
+    del metric
+
+
+def _sample_euclidean_metric_check_gpu(logger, label, coeff, nsample, tol):
+    idx = _sample_indices(coeff.shape[1], nsample)
+    if idx.size == 0:
+        return
+    coeff_sample = cupy.ascontiguousarray(coeff[:, idx])
+    metric = cupy.dot(coeff_sample.T.conj(), coeff_sample).get()
+    del coeff_sample
+    _free_gpu_memory()
+    err, diag_err, offdiag_err = _metric_deviation(metric, 1.0)
+    _log_orth_check(logger, label, err, diag_err, offdiag_err, tol)
+    del metric
+
+
+def _sample_lomo_occ_metric_check_gpu(logger, LOMO, mf_mo_occ, nsample, tol):
+    occ_idx = numpy.where(numpy.asarray(mf_mo_occ) > 0)[0]
+    idx = occ_idx[_sample_indices(len(occ_idx), nsample)]
+    if idx.size == 0:
+        return
+    lomo_sample = cupy.ascontiguousarray(LOMO[:, idx])
+    metric = cupy.dot(lomo_sample.T.conj(), lomo_sample).get()
+    del lomo_sample
+    _free_gpu_memory()
+    err, diag_err, offdiag_err = _metric_deviation(metric, 1.0)
+    _log_orth_check(logger, 'LOMO occupied Euclidean orthogonality',
+                    err, diag_err, offdiag_err, tol)
+    del metric
+
+
+def _sample_overlap_difference_check(logger, mol, ovlp, nsample, tol):
+    if not _env_flag('BYTEQC_LOW_LEVEL_DIRECT_S_CHECK'):
+        return
+    if not hasattr(mol, 'pbc_intor'):
+        return
+    idx = _sample_indices(mol.nao_nr(), nsample)
+    if idx.size == 0:
+        return
+    logger.info(
+        '----------- direct supercell overlap sample check is enabled '
+        '(BYTEQC_LOW_LEVEL_DIRECT_S_CHECK=1)')
+    s_direct = mol.pbc_intor('int1e_ovlp', hermi=1, kpts=None)
+    s_direct = _as_float64_cpu(s_direct)
+    if isinstance(ovlp, cupy.ndarray):
+        idx_gpu = cupy.asarray(idx)
+        s_sample = ovlp[idx_gpu[:, None], idx_gpu].get()
+        del idx_gpu
+    else:
+        s_sample = numpy.asarray(ovlp)[numpy.ix_(idx, idx)]
+    diff = s_sample - s_direct[numpy.ix_(idx, idx)]
+    max_diff = float(numpy.max(numpy.abs(diff))) if diff.size else 0.0
+    msg = (
+        f'----------- S(k2gamma) vs direct supercell S sampled max_abs_diff='
+        f'{max_diff:.3e}, tol={tol:.3e}'
+    )
+    if max_diff > tol:
+        logger.warning(msg)
+    else:
+        logger.info(msg)
+    del s_direct, s_sample, diff
+    _free_gpu_memory()
+
+
+def _sample_complex_k2gamma_mo_check(logger, primitive_mol, kpts, kmesh, primitive_mf,
+                                     ovlp, nsample, tol):
+    if not _env_flag('BYTEQC_LOW_LEVEL_COMPLEX_K2G_MO_CHECK'):
+        return
+    from byteqc.embyte.Tools import k2gamma as pbc_k2gamma
+
+    logger.info(
+        '----------- complex k2gamma MO sample check is enabled '
+        '(BYTEQC_LOW_LEVEL_COMPLEX_K2G_MO_CHECK=1)')
+    cache = pbc_k2gamma.build_k2gamma_cache(
+        primitive_mol, kpts, kmesh=kmesh, wrap_around=False)
+    try:
+        _scell, _e_g, c_gamma, _mo_phase = pbc_k2gamma.mo_k2gamma(
+            primitive_mol,
+            primitive_mf.mo_energy,
+            primitive_mf.mo_coeff,
+            kpts,
+            kmesh=kmesh,
+            cache=cache,
+            with_mo_phase=False,
+            force_real=False,
+            realify_if_needed=False,
+        )
+        idx = _sample_indices(c_gamma.shape[1], nsample)
+        if idx.size == 0:
+            return
+        c_sample = cupy.asarray(
+            numpy.asarray(c_gamma[:, idx], dtype=numpy.complex128, order='C'))
+        s_c = cupy.dot(ovlp, c_sample)
+        metric = cupy.dot(c_sample.T.conj(), s_c).get()
+        del c_sample, s_c
+        _free_gpu_memory()
+        err, diag_err, offdiag_err = _metric_deviation(metric, 1.0)
+        _log_orth_check(
+            logger, 'complex k2gamma MO S-orthogonality',
+            err, diag_err, offdiag_err, tol)
+        del metric
+    finally:
+        try:
+            del cache
+        except UnboundLocalError:
+            pass
+        try:
+            del c_gamma
+        except UnboundLocalError:
+            pass
+        _free_gpu_memory()
+
+
+def _run_low_level_orthogonality_checks(logger, mol, ao_ovlp, aolo, mf_mo_coeff,
+                                        mf_mo_occ, lomo=None):
+    if not _env_flag('BYTEQC_LOW_LEVEL_ORTH_CHECK', '1'):
+        return
+    nsample = int(os.environ.get('BYTEQC_LOW_LEVEL_ORTH_CHECK_COLS', '2048'))
+    tol = float(os.environ.get('BYTEQC_LOW_LEVEL_ORTH_CHECK_TOL', '1e-6'))
+    logger.info(
+        '----------- low-level sampled orthogonality check enabled: '
+        'nsample=%d tol=%.3e',
+        nsample,
+        tol,
+    )
+    _sample_overlap_difference_check(logger, mol, ao_ovlp, nsample, tol)
+    _sample_s_metric_check_gpu(logger, 'AOLO S-orthogonality', aolo, ao_ovlp, nsample, tol)
+    _sample_s_metric_check_gpu(logger, 'MO S-orthogonality', mf_mo_coeff, ao_ovlp, nsample, tol)
+    if lomo is not None:
+        _sample_euclidean_metric_check_gpu(logger, 'LOMO Euclidean orthogonality', lomo, nsample, tol)
+        _sample_lomo_occ_metric_check_gpu(logger, lomo, mf_mo_occ, nsample, tol)
+
+
 _LOW_LEVEL_MATRIX_ATTRS = (
     'AOLO',
     'onerdm_low_ao',
@@ -466,6 +649,19 @@ class low_level_info:
             )
             del s_k, pbc_cache
             self.ao_ovlp = cupy.asarray(ao_ovlp_cpu)
+            if _env_flag('BYTEQC_LOW_LEVEL_COMPLEX_K2G_MO_CHECK'):
+                nsample = int(os.environ.get('BYTEQC_LOW_LEVEL_ORTH_CHECK_COLS', '2048'))
+                tol = float(os.environ.get('BYTEQC_LOW_LEVEL_ORTH_CHECK_TOL', '1e-6'))
+                _sample_complex_k2gamma_mo_check(
+                    logger,
+                    primitive_mol,
+                    self.kpts,
+                    self.kmesh,
+                    primitive_mf,
+                    self.ao_ovlp,
+                    nsample,
+                    tol,
+                )
             mf_mo_coeff = cupy.asarray(numpy.asarray(mf.mo_coeff, dtype=numpy.float64))
             mf.mo_coeff = None
             _free_gpu_memory()
@@ -487,19 +683,26 @@ class low_level_info:
                     '----------- Remove Ewald occupied-orbital shift from mf.mo_energy: +%s',
                     madelung_mf)
 
-        if mol.nao < 8000:
-            ovlp_sum = reduce(cupy.dot, (self.AOLO.T,
-                                         self.ao_ovlp, self.AOLO)).sum().get()
-            if not numpy.isclose(ovlp_sum, mol.nao):
-                logger.info(
-                    f'+++ localized orbitals may not orthogonal!')
-        else:
-            logger.info('----------- skip full AOLO orthogonality check for large system')
+        _run_low_level_orthogonality_checks(
+            logger,
+            mol,
+            self.ao_ovlp,
+            self.AOLO,
+            mf_mo_coeff,
+            mf_mo_occ,
+        )
 
         s_mo = cupy.dot(self.ao_ovlp, mf_mo_coeff)
         self.LOMO = cupy.dot(self.AOLO.T, s_mo)
         del s_mo
         self.LOMO = _fix_orbital_sign_gpu(self.LOMO)
+        if _env_flag('BYTEQC_LOW_LEVEL_ORTH_CHECK', '1'):
+            nsample = int(os.environ.get('BYTEQC_LOW_LEVEL_ORTH_CHECK_COLS', '2048'))
+            tol = float(os.environ.get('BYTEQC_LOW_LEVEL_ORTH_CHECK_TOL', '1e-6'))
+            _sample_euclidean_metric_check_gpu(
+                logger, 'LOMO Euclidean orthogonality', self.LOMO, nsample, tol)
+            _sample_lomo_occ_metric_check_gpu(
+                logger, self.LOMO, mf_mo_occ, nsample, tol)
         occ_idx = mf_mo_occ > 0
         lomo_occ = self.LOMO[:, occ_idx] * cupy.sqrt(
             cupy.asarray(mf_mo_occ[occ_idx]))[None, :]

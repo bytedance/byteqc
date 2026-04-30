@@ -1,5 +1,4 @@
 import gc
-import functools
 import os
 
 import cupy as cp
@@ -24,42 +23,12 @@ from gpu4pyscf.pbc.tools.pbc import _Gv_wrap_around, get_coulG
 
 AO_PAIR_BATCH_SIZE_1 = 256 * 256
 GBLKSIZE_1 = 1024 * 4
-KBLKSIZE_1 = 16
+KBLKSIZE_1 = 64
 AO_PAIR_BATCH_SIZE_2 = 256 * 256
 GBLKSIZE_2 = 1024 * 4
-KBLKSIZE_2 = 16
+KBLKSIZE_2 = 64
 IMAG_TOL = 1e-10
 DEFAULT_SVD_COMPRESS_AUX = 30000
-
-
-_ERI_MEMORY_POOL_STACK = []
-
-
-def _free_current_eri_pool_blocks():
-    cp.cuda.get_current_stream().synchronize()
-    if _ERI_MEMORY_POOL_STACK:
-        _ERI_MEMORY_POOL_STACK[-1].free_all_blocks()
-    lib.free_all_blocks()
-    gc.collect()
-
-
-def _with_eri_memory_pool(func):
-    @functools.wraps(func)
-    def wrapped(*args, **kwargs):
-        pool = cp.cuda.MemoryPool()
-        _ERI_MEMORY_POOL_STACK.append(pool)
-        try:
-            with cp.cuda.using_allocator(pool.malloc):
-                return func(*args, **kwargs)
-        finally:
-            cp.cuda.get_current_stream().synchronize()
-            pool.free_all_blocks()
-            _ERI_MEMORY_POOL_STACK.pop()
-            lib.free_all_blocks()
-            del pool
-            gc.collect()
-
-    return wrapped
 
 
 def _sqrt_psd_eigs_or_raise(eigs, min_eig_allowed=-1e-10):
@@ -96,6 +65,78 @@ def _as_host_canonical_matrix(arr, *, name):
     return arr
 
 
+def _empty_host_canonical_matrix(nrow):
+    return cupyx.empty_pinned((int(nrow), 0), dtype=np.float64, order="C")
+
+
+def _concat_host_canonical_matrices(left, right, *, name):
+    left = _as_host_canonical_matrix(left, name=f"{name}_left")
+    right = _as_host_canonical_matrix(right, name=f"{name}_right")
+    if left.shape[0] != right.shape[0]:
+        raise ValueError(
+            f"{name}: row mismatch between left {left.shape} and right {right.shape}"
+        )
+
+    if left.shape[1] == 0 and right.shape[1] == 0:
+        return _empty_host_canonical_matrix(left.shape[0])
+
+    merged = cupyx.empty_pinned(
+        (left.shape[0], left.shape[1] + right.shape[1]),
+        dtype=np.float64,
+        order="C",
+    )
+    if left.shape[1] > 0:
+        merged[:, :left.shape[1]] = left
+    if right.shape[1] > 0:
+        merged[:, left.shape[1]:] = right
+    return merged
+
+
+def _normalize_incremental_aux_state(active_cpu, *, nov_tot, name):
+    nov_tot = int(nov_tot)
+    if active_cpu is None:
+        return {
+            "compressed_cpu": _empty_host_canonical_matrix(nov_tot),
+            "pending_cpu": _empty_host_canonical_matrix(nov_tot),
+        }
+
+    if isinstance(active_cpu, dict):
+        compressed_cpu = active_cpu.get("compressed_cpu")
+        pending_cpu = active_cpu.get("pending_cpu")
+    else:
+        compressed_cpu = active_cpu
+        pending_cpu = None
+
+    if compressed_cpu is None:
+        compressed_cpu = _empty_host_canonical_matrix(nov_tot)
+    else:
+        compressed_cpu = _as_host_canonical_matrix(
+            compressed_cpu,
+            name=f"{name}_compressed_cpu",
+        )
+    if pending_cpu is None:
+        pending_cpu = _empty_host_canonical_matrix(nov_tot)
+    else:
+        pending_cpu = _as_host_canonical_matrix(
+            pending_cpu,
+            name=f"{name}_pending_cpu",
+        )
+
+    if compressed_cpu.shape[0] != nov_tot:
+        raise ValueError(
+            f"{name}: compressed row mismatch {compressed_cpu.shape} vs nov_tot={nov_tot}"
+        )
+    if pending_cpu.shape[0] != nov_tot:
+        raise ValueError(
+            f"{name}: pending row mismatch {pending_cpu.shape} vs nov_tot={nov_tot}"
+        )
+
+    return {
+        "compressed_cpu": compressed_cpu,
+        "pending_cpu": pending_cpu,
+    }
+
+
 def allocate_incremental_aux_svd_buffers(
     nov_tot,
     *,
@@ -129,6 +170,10 @@ def allocate_incremental_aux_svd_buffers(
         "slice_len_ov": slice_len_ov,
         "max_aux_eigh": max_aux_eigh,
         "max_aux_out": max_aux_out,
+        "gram_slice_buf": cp.empty((slice_len_ov * max_aux_eigh,), dtype=np.float64),
+        "gram_mat_buf": cp.empty((max_aux_eigh * max_aux_eigh,), dtype=np.float64),
+        "proj_slice_buf": cp.empty((slice_len_ov * max_aux_eigh,), dtype=np.float64),
+        "proj_out_buf": cp.empty((slice_len_ov * max_aux_out,), dtype=np.float64),
         "proj_out_host_buf": cupyx.empty_pinned((slice_len_ov * max_aux_out,), dtype=np.float64),
     }
 
@@ -163,16 +208,19 @@ def compress_canonical_aux_matrix(
     slice_len_ov = max(1, min(int(work_buffers["slice_len_ov"]), nov_tot))
     ovslice_list = [slice(p0, p1) for p0, p1 in prange(0, nov_tot, slice_len_ov)]
 
-    LL_svd = lib.empty_from_buf(None, (naux, naux), np.float64, order="F")
+    LL_svd = lib.empty_from_buf(
+        work_buffers["gram_mat_buf"], (naux, naux), np.float64, order="F"
+    )
     LL_svd[:] = 0
     for sov in ovslice_list:
         sov_len = sov.stop - sov.start
-        sov_L = lib.empty_from_buf(None, (sov_len, naux), np.float64)
+        sov_L = lib.empty_from_buf(work_buffers["gram_slice_buf"], (sov_len, naux), np.float64)
         sov_L.set(cderi_cpu[sov])
         lib.gemm(sov_L, sov_L, transa="T", c=LL_svd, beta=1.0)
-        sov_L = None
 
-    _free_current_eri_pool_blocks()
+    cp.cuda.get_current_stream().synchronize()
+    lib.free_all_blocks()
+    gc.collect()
 
     S, U_svd = cp.linalg._eigenvalue._syevd(LL_svd, "L", with_eigen_vector=True, overwrite_a=True)
     S = _sqrt_psd_eigs_or_raise(S, min_eig_allowed=-1e-10)
@@ -202,82 +250,138 @@ def compress_canonical_aux_matrix(
 
     for sov in ovslice_list:
         sov_len = sov.stop - sov.start
-        ovs_L = lib.empty_from_buf(None, (sov_len, naux), np.float64)
+        ovs_L = lib.empty_from_buf(work_buffers["proj_slice_buf"], (sov_len, naux), np.float64)
         ovs_L.set(cderi_cpu[sov])
-        cderi_cut_s = lib.gemm(ovs_L, U_svd, transa="N", transb="N")
+        cderi_cut_s = lib.gemm(ovs_L, U_svd, buf=work_buffers["proj_out_buf"], transa="N", transb="N")
         cderi_cut_s_h = lib.empty_from_buf(
             work_buffers["proj_out_host_buf"], (sov_len, naux_cut), np.float64
         )
         cderi_cut_s.get(out=cderi_cut_s_h, blocking=True)
         cderi_cut[sov] = cderi_cut_s_h
-        ovs_L = None
-        cderi_cut_s = None
 
-    U_svd = None
-    LL_svd = None
-    _free_current_eri_pool_blocks()
+    cp.cuda.get_current_stream().synchronize()
+    lib.free_all_blocks()
+    gc.collect()
 
     if owns_buffers:
         del work_buffers
-        _free_current_eri_pool_blocks()
+        cp.cuda.get_current_stream().synchronize()
+        lib.free_all_blocks()
+        gc.collect()
 
     return cderi_cut
 
 
-def compress_canonical_aux_matrix_in_aux_chunks(
-    cderi_cpu,
+def append_canonical_aux_block(
+    active_cpu,
+    new_cpu,
     *,
     svd_tol,
-    buffers,
+    buffers=None,
     logger=None,
-    label="aux_chunk_svd",
+    label="incremental_aux_svd",
     compress_aux=DEFAULT_SVD_COMPRESS_AUX,
-    return_chunks=False,
+    finalize=False,
 ):
-    cderi_cpu = _as_host_canonical_matrix(cderi_cpu, name=f"{label}_input")
-    nov_tot, naux_tot = cderi_cpu.shape
+    new_cpu = _as_host_canonical_matrix(new_cpu, name="new_cpu")
+    nov_tot, naux_new = new_cpu.shape
     compress_aux = int(compress_aux)
     if compress_aux <= 0:
         raise ValueError(f"compress_aux must be positive; got {compress_aux}")
+    state = _normalize_incremental_aux_state(
+        active_cpu,
+        nov_tot=nov_tot,
+        name="active_cpu",
+    )
+    compressed_cpu = state["compressed_cpu"]
+    pending_cpu = state["pending_cpu"]
 
-    chunks = []
-    for p0 in range(0, naux_tot, compress_aux):
-        p1 = min(naux_tot, p0 + compress_aux)
-        chunk = compress_canonical_aux_matrix(
-            cderi_cpu[:, p0:p1],
-            svd_tol=svd_tol,
-            buffers=buffers,
-            logger=logger,
-            label=f"{label} aux[{p0}:{p1}]",
-        )
-        chunk = _as_host_canonical_matrix(chunk, name=f"{label}_chunk")
-        chunks.append(chunk)
-
-    if return_chunks:
-        return chunks
-
-    return concatenate_canonical_aux_chunks(chunks, nov_tot=nov_tot)
-
-
-def concatenate_canonical_aux_chunks(chunks, *, nov_tot=None):
-    if len(chunks) == 1:
-        return chunks[0]
-
-    if nov_tot is None:
-        nov_tot = int(chunks[0].shape[0])
-    naux_cut_tot = sum(int(chunk.shape[1]) for chunk in chunks)
-    out = cupyx.empty_pinned((nov_tot, naux_cut_tot), dtype=np.float64, order="C")
     pos = 0
-    for chunk in chunks:
-        width = int(chunk.shape[1])
-        out[:, pos:pos + width] = chunk
-        pos += width
-    chunks = None
-    gc.collect()
-    return out
+    while pos < naux_new:
+        pending_cols = int(pending_cpu.shape[1])
+        if pending_cols >= compress_aux:
+            merged_cpu = _concat_host_canonical_matrices(
+                compressed_cpu,
+                pending_cpu,
+                name=f"{label}_compress_input",
+            )
+            compressed_cpu = _as_host_canonical_matrix(
+                compress_canonical_aux_matrix(
+                    merged_cpu,
+                    svd_tol=svd_tol,
+                    buffers=buffers,
+                    logger=logger,
+                    label=label,
+                ),
+                name=f"{label}_compressed",
+            )
+            pending_cpu = _empty_host_canonical_matrix(nov_tot)
+            pending_cols = 0
+        take = min(naux_new - pos, compress_aux - pending_cols)
+        pending_cpu = _concat_host_canonical_matrices(
+            pending_cpu,
+            new_cpu[:, pos:pos + take],
+            name=f"{label}_pending_append",
+        )
+        pos += take
+
+        if pending_cpu.shape[1] >= compress_aux:
+            merged_cpu = _concat_host_canonical_matrices(
+                compressed_cpu,
+                pending_cpu,
+                name=f"{label}_compress_input",
+            )
+            compressed_cpu = _as_host_canonical_matrix(
+                compress_canonical_aux_matrix(
+                    merged_cpu,
+                    svd_tol=svd_tol,
+                    buffers=buffers,
+                    logger=logger,
+                    label=label,
+                ),
+                name=f"{label}_compressed",
+            )
+            pending_cpu = _empty_host_canonical_matrix(nov_tot)
+
+    if finalize and pending_cpu.shape[1] > 0:
+        merged_cpu = _concat_host_canonical_matrices(
+            compressed_cpu,
+            pending_cpu,
+            name=f"{label}_finalize_input",
+        )
+        compressed_cpu = _as_host_canonical_matrix(
+            compress_canonical_aux_matrix(
+                merged_cpu,
+                svd_tol=svd_tol,
+                buffers=buffers,
+                logger=logger,
+                label=label,
+            ),
+            name=f"{label}_compressed",
+        )
+        pending_cpu = _empty_host_canonical_matrix(nov_tot)
+
+    return {
+        "compressed_cpu": compressed_cpu,
+        "pending_cpu": pending_cpu,
+    }
 
 
 def format_canonical_aux_for_solver(cderi_cpu, *, solver_type, out=None):
+    if isinstance(cderi_cpu, dict):
+        state = _normalize_incremental_aux_state(
+            cderi_cpu,
+            nov_tot=cderi_cpu["compressed_cpu"].shape[0]
+            if cderi_cpu.get("compressed_cpu") is not None
+            else cderi_cpu["pending_cpu"].shape[0],
+            name="cderi_cpu_state",
+        )
+        if state["pending_cpu"].shape[1] > 0:
+            raise ValueError(
+                "Incremental auxiliary state still contains pending columns; "
+                "the final append_canonical_aux_block call should use finalize=True"
+            )
+        cderi_cpu = state["compressed_cpu"]
     cderi_cpu = _as_host_canonical_matrix(cderi_cpu, name="cderi_cpu")
     if solver_type == "MP2":
         if out is None:
@@ -371,38 +475,14 @@ def _gamma_ao_to_k_coeff(cell, kpts, mo_coeff, kmesh, wrap_around=False):
     return coeff_k
 
 
-def _apply_C_dot_kwise_host(cell, coeff_k, nao_out):
-    coeff_k = np.asarray(coeff_k, dtype=np.complex128, order="C")
-    if coeff_k.ndim != 3:
-        raise ValueError(f"Expected k-resolved coefficients to be 3D; got {coeff_k.shape}")
-    nkpts, nao_in, nmo = coeff_k.shape
-    coeff_out = cupyx.empty_pinned((nkpts, int(nao_out), nmo), dtype=np.complex128, order="C")
-    for k in range(nkpts):
-        coeff_d = cp.asarray(coeff_k[k], dtype=np.complex128, order="C")
-        coeff_t = cell.apply_C_dot(coeff_d.reshape(1, nao_in, nmo), axis=1)
-        coeff_t = coeff_t.reshape(int(nao_out), nmo)
-        coeff_t.get(out=coeff_out[k], blocking=True)
-        coeff_d = None
-        coeff_t = None
-        _free_current_eri_pool_blocks()
-    return coeff_out
-
-
 def _accumulate_real_aux_channels(dst, src, *, weight, sqrt2, imag_sign=1.0):
     naux = int(src.shape[-1])
     if weight == 1:
         dst[..., :naux] += src.real
         return 0.0
     if weight == 2:
-        # src is a disposable host staging block; scale in-place to avoid large temporaries.
-        src *= sqrt2
-        dst[..., :naux] += src.real
-        if imag_sign == 1.0:
-            dst[..., naux:2 * naux] += src.imag
-        elif imag_sign == -1.0:
-            dst[..., naux:2 * naux] -= src.imag
-        else:
-            dst[..., naux:2 * naux] += imag_sign * src.imag
+        dst[..., :naux] += sqrt2 * src.real
+        dst[..., naux:2 * naux] += imag_sign * sqrt2 * src.imag
         return 0.0
     raise ValueError(f"Unsupported time-reversal weight {weight}")
 
@@ -496,6 +576,8 @@ def _build_full_q_cderi_host(
     eval_ft,
     Gv,
     kpts,
+    q_j3c_z_buf,
+    cderi_q_pair_buf,
     cderi_q_full_host_buf,
     cderi_q_batch_host_buf,
     debug_sync,
@@ -518,7 +600,7 @@ def _build_full_q_cderi_host(
                 f"Unexpected raw_j3c auxiliary dimension {raw_j3c.shape[1]}; expected {naux_cart}"
             )
 
-        q_j3c_z = lib.empty_from_buf(None, (1, naux_cart, pair_size, 2), np.float64)
+        q_j3c_z = lib.empty_from_buf(q_j3c_z_buf, (1, naux_cart, pair_size, 2), np.float64)
         lib.contraction(
             "prL",
             raw_j3c,
@@ -537,7 +619,9 @@ def _build_full_q_cderi_host(
                 pqG = None
                 auxG_c = None
 
-        cderi_q_pair = lib.empty_from_buf(None, (naux_q, pair_size), np.complex128)
+        cderi_q_pair = lib.empty_from_buf(
+            cderi_q_pair_buf, (naux_q, pair_size), np.complex128
+        )
         lib.contraction("Lr", aux_coeff_q.T, "rp", q_j3c, "Lp", cderi_q_pair)
         if debug_sync:
             cp.cuda.get_current_stream().synchronize()
@@ -564,7 +648,6 @@ def _build_full_q_cderi_host(
     return q_cderi_host
 
 
-@_with_eri_memory_pool
 def eri_OVL_SIE_MP2(
     cell,
     auxcell,
@@ -608,7 +691,9 @@ def eri_OVL_SIE_MP2(
         )
     _ = j2c
 
-    _free_current_eri_pool_blocks()
+    cp.cuda.get_current_stream().synchronize()
+    lib.free_all_blocks()
+    gc.collect()
 
     if cell.dimension != 3:
         raise NotImplementedError("The current multi-k eri_OVL_SIE_MP2 path only supports 3D cells")
@@ -641,6 +726,8 @@ def eri_OVL_SIE_MP2(
         kmesh = _to_numpy_array(kmesh, dtype=int)
     if int(np.prod(kmesh)) != nkpts:
         raise ValueError(f"kmesh {tuple(kmesh)} is incompatible with {nkpts} k-points")
+    # import ipdb
+    # ipdb.set_trace()
     coeff_i1_k = _gamma_ao_to_k_coeff(cell, kpts, mo_coeff_i1, kmesh, wrap_around=wrap_around)
     coeff_j1_k = _gamma_ao_to_k_coeff(cell, kpts, mo_coeff_j1, kmesh, wrap_around=wrap_around)
     coeff_i2_k = _gamma_ao_to_k_coeff(cell, kpts, mo_coeff_i2, kmesh, wrap_around=wrap_around)
@@ -674,10 +761,26 @@ def eri_OVL_SIE_MP2(
             ao_nao,
         )
 
-    coeff_i1_k = _apply_C_dot_kwise_host(int3c2e_opt.cell, coeff_i1_k, nao_unpack)
-    coeff_j1_k = _apply_C_dot_kwise_host(int3c2e_opt.cell, coeff_j1_k, nao_unpack)
-    coeff_i2_k = _apply_C_dot_kwise_host(int3c2e_opt.cell, coeff_i2_k, nao_unpack)
-    coeff_j2_k = _apply_C_dot_kwise_host(int3c2e_opt.cell, coeff_j2_k, nao_unpack)
+    coeff_i1_k = np.asarray(
+        cp.asnumpy(int3c2e_opt.cell.apply_C_dot(cp.asarray(coeff_i1_k), axis=1)),
+        dtype=np.complex128,
+        order="C",
+    )
+    coeff_j1_k = np.asarray(
+        cp.asnumpy(int3c2e_opt.cell.apply_C_dot(cp.asarray(coeff_j1_k), axis=1)),
+        dtype=np.complex128,
+        order="C",
+    )
+    coeff_i2_k = np.asarray(
+        cp.asnumpy(int3c2e_opt.cell.apply_C_dot(cp.asarray(coeff_i2_k), axis=1)),
+        dtype=np.complex128,
+        order="C",
+    )
+    coeff_j2_k = np.asarray(
+        cp.asnumpy(int3c2e_opt.cell.apply_C_dot(cp.asarray(coeff_j2_k), axis=1)),
+        dtype=np.complex128,
+        order="C",
+    )
 
     cd_j2c_cache, negative_metric_size = _precontract_j2c_aux_coeff(
         int3c2e_opt.auxcell,
@@ -807,6 +910,10 @@ def eri_OVL_SIE_MP2(
         auxG_conj = None
         g_slices = []
 
+    coeff_i1_gpu = [cp.asarray(coeff_i1_k[k], dtype=np.complex128, order="C") for k in range(nkpts)]
+    coeff_j1_gpu = [cp.asarray(coeff_j1_k[k], dtype=np.complex128, order="C") for k in range(nkpts)]
+    coeff_i2_gpu = [cp.asarray(coeff_i2_k[k], dtype=np.complex128, order="C") for k in range(nkpts)]
+    coeff_j2_gpu = [cp.asarray(coeff_j2_k[k], dtype=np.complex128, order="C") for k in range(nkpts)]
     # q-space auxiliary factors B_q are orthonormal to each other. Returning
     # gamma-supercell real-space factors requires the inverse k2gamma transform
     # on the auxiliary index, which contributes a global 1/sqrt(Nk) factor to
@@ -818,8 +925,15 @@ def eri_OVL_SIE_MP2(
     max_kblk = max(active_kblk_sizes) if active_kblk_sizes else 0
     npair_total = int(ao_pair_offsets[-1]) if len(ao_pair_offsets) else 0
     if max_pair_size > 0 and max_kblk > 0 and max_naux_q > 0:
+        q_j3c_z_buf = cp.empty((naux_cart * max_pair_size * 2,), dtype=np.float64)
+        cderi_q_pair_buf = cp.empty((max_naux_q * max_pair_size,), dtype=np.complex128)
+        cderi_q_full_buf = cp.empty((max_kblk * npair_total,), dtype=np.complex128)
         cderi_q_full_host_buf = cupyx.empty_pinned((max_naux_q, npair_total), dtype=np.complex128, order="C")
         cderi_q_batch_host_buf = cupyx.empty_pinned((max_naux_q, max_pair_size), dtype=np.complex128, order="C")
+        tmp_iLq_buf = cp.empty((nmo_i1 * max_kblk * nao_unpack,), dtype=np.complex128)
+        tmp_jLq_buf = cp.empty((nmo_j2 * max_kblk * nao_unpack,), dtype=np.complex128)
+        ov_blk_buf = cp.empty((nmo_i1 * nmo_j1 * max_kblk,), dtype=np.complex128)
+        vo_blk_buf = cp.empty((nmo_j2 * nmo_i2 * max_kblk,), dtype=np.complex128)
         ov_host_buf = cupyx.empty_pinned((nmo_i1 * nmo_j1 * max_kblk,), dtype=np.complex128)
         vo_host_buf = cupyx.empty_pinned((nmo_j2 * nmo_i2 * max_kblk,), dtype=np.complex128)
         ov_debug_sum_buf = (
@@ -831,8 +945,15 @@ def eri_OVL_SIE_MP2(
             if debug_imag_check else None
         )
     else:
+        q_j3c_z_buf = None
+        cderi_q_pair_buf = None
+        cderi_q_full_buf = None
         cderi_q_full_host_buf = None
         cderi_q_batch_host_buf = None
+        tmp_iLq_buf = None
+        tmp_jLq_buf = None
+        ov_blk_buf = None
+        vo_blk_buf = None
         ov_host_buf = None
         vo_host_buf = None
         ov_debug_sum_buf = None
@@ -894,15 +1015,20 @@ def eri_OVL_SIE_MP2(
             eval_ft=eval_ft,
             Gv=Gv,
             kpts=kpts,
+            q_j3c_z_buf=q_j3c_z_buf,
+            cderi_q_pair_buf=cderi_q_pair_buf,
             cderi_q_full_host_buf=cderi_q_full_host_buf,
             cderi_q_batch_host_buf=cderi_q_batch_host_buf,
             debug_sync=debug_sync,
         )
-        _free_current_eri_pool_blocks()
+        cp.cuda.get_current_stream().synchronize()
+        lib.free_all_blocks()
         for K0 in range(0, naux_q, Kblksize):
             K1 = min(naux_q, K0 + Kblksize)
             block_len = K1 - K0
-            cderi_q = lib.empty_from_buf(None, (block_len, npair_total), np.complex128)
+            cderi_q = lib.empty_from_buf(
+                cderi_q_full_buf, (block_len, npair_total), np.complex128
+            )
             cderi_q.set(q_cderi_host[K0:K1])
             if weight == 1 and debug_imag_check:
                 ov_debug_sum = lib.empty_from_buf(
@@ -945,61 +1071,49 @@ def eri_OVL_SIE_MP2(
                 ov_host = lib.empty_from_buf(ov_host_buf, (nmo_i1, nmo_j1, block_len), np.complex128)
                 vo_host = lib.empty_from_buf(vo_host_buf, (nmo_j2, nmo_i2, block_len), np.complex128)
 
-                coeff_i1_d = cp.asarray(coeff_i1_k[int(ki)], dtype=np.complex128, order="C")
-                coeff_j1_d = cp.asarray(coeff_j1_k[int(kj)], dtype=np.complex128, order="C")
-                tmp = lib.empty_from_buf(None, (nmo_i1, block_len, nao_unpack), np.complex128)
+                tmp = lib.empty_from_buf(tmp_iLq_buf, (nmo_i1, block_len, nao_unpack), np.complex128)
                 lib.contraction(
                     "Lpq",
                     ao_pair,
                     "pi",
-                    coeff_i1_d,
+                    coeff_i1_gpu[int(ki)],
                     "iLq",
                     tmp,
                     opb="CONJ",
                 )
-                ov_blk = lib.empty_from_buf(None, (nmo_i1, nmo_j1, block_len), np.complex128)
+                ov_blk = lib.empty_from_buf(ov_blk_buf, (nmo_i1, nmo_j1, block_len), np.complex128)
                 lib.contraction(
                     "iLq",
                     tmp,
                     "qj",
-                    coeff_j1_d,
+                    coeff_j1_gpu[int(kj)],
                     "ijL",
                     ov_blk,
-                    alpha=pair_norm,
                 )
+                ov_blk *= pair_norm
                 ov_blk.get(out=ov_host, blocking=True)
-                coeff_i1_d = None
-                coeff_j1_d = None
-                tmp = None
-                ov_blk = None
 
-                coeff_j2_d = cp.asarray(coeff_j2_k[int(ki)], dtype=np.complex128, order="C")
-                coeff_i2_d = cp.asarray(coeff_i2_k[int(kj)], dtype=np.complex128, order="C")
-                tmp = lib.empty_from_buf(None, (nmo_j2, block_len, nao_unpack), np.complex128)
+                tmp = lib.empty_from_buf(tmp_jLq_buf, (nmo_j2, block_len, nao_unpack), np.complex128)
                 lib.contraction(
                     "Lpq",
                     ao_pair,
                     "pj",
-                    coeff_j2_d,
+                    coeff_j2_gpu[int(ki)],
                     "jLq",
                     tmp,
                     opb="CONJ",
                 )
-                vo_blk = lib.empty_from_buf(None, (nmo_j2, nmo_i2, block_len), np.complex128)
+                vo_blk = lib.empty_from_buf(vo_blk_buf, (nmo_j2, nmo_i2, block_len), np.complex128)
                 lib.contraction(
                     "jLq",
                     tmp,
                     "qi",
-                    coeff_i2_d,
+                    coeff_i2_gpu[int(kj)],
                     "jiL",
                     vo_blk,
-                    alpha=pair_norm,
                 )
+                vo_blk *= pair_norm
                 vo_blk.get(out=vo_host, blocking=True)
-                coeff_j2_d = None
-                coeff_i2_d = None
-                tmp = None
-                vo_blk = None
 
                 real_slice = slice(l0 + K0, l0 + K1)
                 if weight == 1:
@@ -1010,18 +1124,17 @@ def eri_OVL_SIE_MP2(
                         vo_debug_sum += vo_host
                 elif weight == 2:
                     imag_slice = slice(l0 + naux_q + K0, l0 + naux_q + K1)
-                    ov_host *= sqrt2
-                    vo_host *= sqrt2
-                    ovL_cpu[:, :, real_slice] += ov_host.real
-                    ovL_cpu[:, :, imag_slice] += ov_host.imag
-                    voL_cpu[:, :, real_slice] += vo_host.real
-                    voL_cpu[:, :, imag_slice] += vo_host.imag
+                    ovL_cpu[:, :, real_slice] += sqrt2 * ov_host.real
+                    ovL_cpu[:, :, imag_slice] += sqrt2 * ov_host.imag
+                    voL_cpu[:, :, real_slice] += sqrt2 * vo_host.real
+                    voL_cpu[:, :, imag_slice] += sqrt2 * vo_host.imag
                 else:
                     raise ValueError(f"Unsupported time-reversal weight {weight} for q={k_aux}")
 
+                tmp = None
+                ov_blk = None
+                vo_blk = None
                 ao_pair = None
-                ov_host = None
-                vo_host = None
 
             unpacked = None
             cderi_q = None
@@ -1050,22 +1163,25 @@ def eri_OVL_SIE_MP2(
         else:
             l0 += 2 * naux_q
 
-        _free_current_eri_pool_blocks()
+        cp.cuda.get_current_stream().synchronize()
+        lib.free_all_blocks()
+        gc.collect()
 
-    del coeff_i1_k, coeff_j1_k, coeff_i2_k, coeff_j2_k
+    del coeff_i1_gpu, coeff_j1_gpu, coeff_i2_gpu, coeff_j2_gpu
     del aux_coeffs, cd_j2c_cache, eval_j3c, ao_pair_offsets, expLk_full, expLk_conjz_full
     del bas_ij_aggregated, kpt_iters, stored_kpts, pair_address
-    del cderi_q_full_host_buf, cderi_q_batch_host_buf
-    del ov_host_buf, vo_host_buf
+    del q_j3c_z_buf, cderi_q_pair_buf, cderi_q_full_buf, cderi_q_full_host_buf, cderi_q_batch_host_buf
+    del tmp_iLq_buf, tmp_jLq_buf, ov_blk_buf, vo_blk_buf, ov_host_buf, vo_host_buf
     del ov_debug_sum_buf, vo_debug_sum_buf
     if with_long_range:
         del Gv, auxG_conj, eval_ft
-    _free_current_eri_pool_blocks()
+    cp.cuda.get_current_stream().synchronize()
+    lib.free_all_blocks()
+    gc.collect()
 
     return ovL_cpu, voL_cpu
 
 
-@_with_eri_memory_pool
 def eri_high_level_solver_incore(
     cell,
     auxcell,
@@ -1109,7 +1225,9 @@ def eri_high_level_solver_incore(
         )
     _ = j2c
 
-    _free_current_eri_pool_blocks()
+    cp.cuda.get_current_stream().synchronize()
+    lib.free_all_blocks()
+    gc.collect()
 
     if cell.dimension != 3:
         raise NotImplementedError("The current multi-k eri_high_level_solver_incore path only supports 3D cells")
@@ -1213,6 +1331,7 @@ def eri_high_level_solver_incore(
     total_naux_real = 0
     active_naux_q = []
     active_kblk_sizes = []
+    total_aux_blocks = 0
     for idx, (k_aux, *_rest) in enumerate(kpt_iters):
         weight = int(weights[k_aux])
         if weight > 0:
@@ -1224,6 +1343,7 @@ def eri_high_level_solver_incore(
             else:
                 kblk_i = max(1, min(int(Lblksize), naux_q_i))
             active_kblk_sizes.append(kblk_i)
+            total_aux_blocks += (naux_q_i + kblk_i - 1) // kblk_i
     if total_naux_real <= 0:
         raise RuntimeError("No real auxiliary channels survived the time-reversal reduction")
 
@@ -1325,8 +1445,13 @@ def eri_high_level_solver_incore(
     npair_total = int(ao_pair_offsets[-1]) if len(ao_pair_offsets) else 0
 
     if max_pair_size > 0 and max_kblk > 0 and max_naux_q > 0:
+        q_j3c_z_buf = cp.empty((naux_cart * max_pair_size * 2,), dtype=np.float64)
+        cderi_q_pair_buf = cp.empty((max_naux_q * max_pair_size,), dtype=np.complex128)
+        cderi_q_full_buf = cp.empty((max_kblk * npair_total,), dtype=np.complex128)
         cderi_q_full_host_buf = cupyx.empty_pinned((max_naux_q, npair_total), dtype=np.complex128, order="C")
         cderi_q_batch_host_buf = cupyx.empty_pinned((max_naux_q, max_pair_size), dtype=np.complex128, order="C")
+        tmp_iLq_buf = cp.empty((nmo_i * max_kblk * nao_unpack,), dtype=np.complex128)
+        pq_blk_buf = cp.empty((nmo_i * nmo_j * max_kblk,), dtype=np.complex128)
         pq_host_buf = cupyx.empty_pinned((nmo_i, nmo_j, max_kblk), dtype=np.complex128, order="C")
         pq_real_buf = cupyx.empty_pinned((nmo_i, nmo_j, max_real_kblk), dtype=np.float64, order="C")
         pq_debug_sum_buf = (
@@ -1334,8 +1459,13 @@ def eri_high_level_solver_incore(
             if debug_imag_check else None
         )
     else:
+        q_j3c_z_buf = None
+        cderi_q_pair_buf = None
+        cderi_q_full_buf = None
         cderi_q_full_host_buf = None
         cderi_q_batch_host_buf = None
+        tmp_iLq_buf = None
+        pq_blk_buf = None
         pq_host_buf = None
         pq_real_buf = None
         pq_debug_sum_buf = None
@@ -1349,8 +1479,8 @@ def eri_high_level_solver_incore(
         max_aux_out=svd_buffer_aux,
     )
 
-    canonical_cderi_cpu = cupyx.empty_pinned((nov_tot, total_naux_real), dtype=np.float64, order="C")
-    aux_write_pos = 0
+    active_cderi_cpu = None
+    processed_aux_blocks = 0
     for j2c_idx, (k_aux, _k_aux_conj, ki_idx, kj_idx) in enumerate(kpt_iters):
         weight = int(weights[k_aux])
         if weight <= 0:
@@ -1402,13 +1532,14 @@ def eri_high_level_solver_incore(
             eval_ft=eval_ft,
             Gv=Gv,
             kpts=kpts,
+            q_j3c_z_buf=q_j3c_z_buf,
+            cderi_q_pair_buf=cderi_q_pair_buf,
             cderi_q_full_host_buf=cderi_q_full_host_buf,
             cderi_q_batch_host_buf=cderi_q_batch_host_buf,
             debug_sync=debug_sync,
         )
-        _free_current_eri_pool_blocks()
-        # Keep the persisted aux-column order independent of KBLKSIZE.
-        q_aux_base = aux_write_pos
+        cp.cuda.get_current_stream().synchronize()
+        lib.free_all_blocks()
         for K0 in range(0, naux_q, Kblksize):
             K1 = min(naux_q, K0 + Kblksize)
             block_len = K1 - K0
@@ -1431,7 +1562,9 @@ def eri_high_level_solver_incore(
                 real_width,
             )
 
-            cderi_q = lib.empty_from_buf(None, (block_len, npair_total), np.complex128)
+            cderi_q = lib.empty_from_buf(
+                cderi_q_full_buf, (block_len, npair_total), np.complex128
+            )
             cderi_q.set(q_cderi_host[K0:K1])
             if debug_sync:
                 cp.cuda.get_current_stream().synchronize()
@@ -1459,7 +1592,7 @@ def eri_high_level_solver_incore(
 
             for ki, kj in zip(ki_idx, kj_idx):
                 ao_pair = unpacked[ki]
-                tmp = lib.empty_from_buf(None, (nmo_i, block_len, nao_unpack), np.complex128)
+                tmp = lib.empty_from_buf(tmp_iLq_buf, (nmo_i, block_len, nao_unpack), np.complex128)
                 lib.contraction(
                     "Lpq",
                     ao_pair,
@@ -1469,7 +1602,7 @@ def eri_high_level_solver_incore(
                     tmp,
                     opb="CONJ",
                 )
-                pq_blk = lib.empty_from_buf(None, (nmo_i, nmo_j, block_len), np.complex128)
+                pq_blk = lib.empty_from_buf(pq_blk_buf, (nmo_i, nmo_j, block_len), np.complex128)
                 lib.contraction(
                     "iLq",
                     tmp,
@@ -1477,15 +1610,15 @@ def eri_high_level_solver_incore(
                     coeff_j_gpu[int(kj)],
                     "ijL",
                     pq_blk,
-                    alpha=pair_norm,
                 )
+                pq_blk *= pair_norm
                 pq_host = lib.empty_from_buf(pq_host_buf, (nmo_i, nmo_j, block_len), np.complex128)
                 pq_blk.get(out=pq_host, blocking=True)
-                tmp = None
-                pq_blk = None
                 if weight == 1 and debug_imag_check:
                     pq_debug_sum += pq_host
                 _accumulate_real_aux_channels(pq_real, pq_host, weight=weight, sqrt2=sqrt2)
+                tmp = None
+                pq_blk = None
                 pq_host = None
                 ao_pair = None
 
@@ -1498,64 +1631,46 @@ def eri_high_level_solver_incore(
                 )
                 pq_debug_sum = None
 
+            processed_aux_blocks += 1
             pq_real_view = pq_real.reshape(nov_tot, real_width)
-            if weight == 1:
-                canonical_cderi_cpu[:, q_aux_base + K0:q_aux_base + K1] = pq_real_view
-            elif weight == 2:
-                real_dst = slice(q_aux_base + K0, q_aux_base + K1)
-                imag_dst = slice(q_aux_base + naux_q + K0, q_aux_base + naux_q + K1)
-                canonical_cderi_cpu[:, real_dst] = pq_real_view[:, :block_len]
-                canonical_cderi_cpu[:, imag_dst] = pq_real_view[:, block_len:real_width]
-            else:
-                raise ValueError(f"Unsupported time-reversal weight {weight}")
-            pq_real_view = None
+            active_cderi_cpu = append_canonical_aux_block(
+                active_cderi_cpu,
+                pq_real_view,
+                svd_tol=svd_tol,
+                buffers=svd_buffers,
+                logger=log,
+                label="eri_high_level_solver_incore incremental",
+                compress_aux=svd_compress_aux,
+                finalize=(processed_aux_blocks == total_aux_blocks),
+            )
 
         q_cderi_host = None
-        aux_write_pos += weight * naux_q
 
         if weight == 1 and debug_imag_check:
             _log_self_conj_imag_result(
                 log, "cderi", k_aux, pq_imag_max, pq_imag_real_max, imag_tol, pq_imag_info
             )
 
-        _free_current_eri_pool_blocks()
+        cp.cuda.get_current_stream().synchronize()
+        lib.free_all_blocks()
+        gc.collect()
 
-    if aux_write_pos != total_naux_real:
-        raise RuntimeError(
-            f"Filled auxiliary width {aux_write_pos}, expected {total_naux_real}"
-        )
-    compressed_cderi_chunks = compress_canonical_aux_matrix_in_aux_chunks(
-        canonical_cderi_cpu,
-        svd_tol=svd_tol,
-        buffers=svd_buffers,
-        logger=log,
-        label="eri_high_level_solver_incore",
-        compress_aux=svd_compress_aux,
-        return_chunks=True,
-    )
-    canonical_cderi_cpu = None
-    gc.collect()
-    compressed_cderi_cpu = concatenate_canonical_aux_chunks(
-        compressed_cderi_chunks,
-        nov_tot=nov_tot,
-    )
-    compressed_cderi_chunks = None
-    gc.collect()
-    cderi_cut = format_canonical_aux_for_solver(compressed_cderi_cpu, solver_type=solver_type)
+    cderi_cut = format_canonical_aux_for_solver(active_cderi_cpu, solver_type=solver_type)
 
     del coeff_i_gpu, coeff_j_gpu, aux_coeffs, cd_j2c_cache, eval_j3c, ao_pair_offsets
     del expLk_full, expLk_conjz_full, bas_ij_aggregated, kpt_iters, stored_kpts, pair_address
-    del cderi_q_full_host_buf, cderi_q_batch_host_buf
-    del pq_host_buf, pq_real_buf, pq_debug_sum_buf
+    del q_j3c_z_buf, cderi_q_pair_buf, cderi_q_full_buf, cderi_q_full_host_buf, cderi_q_batch_host_buf
+    del tmp_iLq_buf, pq_blk_buf, pq_host_buf, pq_real_buf, pq_debug_sum_buf
     if with_long_range:
         del Gv, auxG_conj, eval_ft
-    del compressed_cderi_cpu, svd_buffers
-    _free_current_eri_pool_blocks()
+    del active_cderi_cpu, svd_buffers
+    cp.cuda.get_current_stream().synchronize()
+    lib.free_all_blocks()
+    gc.collect()
 
     return cderi_cut
 
 
-@_with_eri_memory_pool
 def eri_high_level_solver_incore_with_jk(
     cell,
     auxcell,
@@ -1597,7 +1712,9 @@ def eri_high_level_solver_incore_with_jk(
         )
     _ = j2c
 
-    _free_current_eri_pool_blocks()
+    cp.cuda.get_current_stream().synchronize()
+    lib.free_all_blocks()
+    gc.collect()
 
     if cell.dimension != 3:
         raise NotImplementedError(
@@ -1720,6 +1837,7 @@ def eri_high_level_solver_incore_with_jk(
     total_naux_real = 0
     active_naux_q = []
     active_kblk_sizes = []
+    total_aux_blocks = 0
     for idx, (k_aux, *_rest) in enumerate(kpt_iters):
         weight = int(weights[k_aux])
         if weight > 0:
@@ -1731,6 +1849,7 @@ def eri_high_level_solver_incore_with_jk(
             else:
                 kblk_i = max(1, min(int(Lblksize), naux_q_i))
             active_kblk_sizes.append(kblk_i)
+            total_aux_blocks += (naux_q_i + kblk_i - 1) // kblk_i
     if total_naux_real <= 0:
         raise RuntimeError("No real auxiliary channels survived the time-reversal reduction")
 
@@ -1840,20 +1959,52 @@ def eri_high_level_solver_incore_with_jk(
     max_real_kblk = 2 * max_kblk
 
     if max_pair_size > 0 and max_kblk > 0 and max_naux_q > 0:
+        q_j3c_z_buf = cp.empty((naux_cart * max_pair_size * 2,), dtype=np.float64)
+        cderi_q_pair_buf = cp.empty((max_naux_q * max_pair_size,), dtype=np.complex128)
+        cderi_q_full_buf = cp.empty((max_kblk * npair_total,), dtype=np.complex128)
         cderi_q_full_host_buf = cupyx.empty_pinned((max_naux_q, npair_total), dtype=np.complex128, order="C")
         cderi_q_batch_host_buf = cupyx.empty_pinned((max_naux_q, max_pair_size), dtype=np.complex128, order="C")
+        tmp_left_buf = cp.empty(((nmo + ncore) * max_kblk * nao_unpack,), dtype=np.complex128)
+        pq_blk_buf = cp.empty((nmo * nmo * max_kblk,), dtype=np.complex128)
         pq_host_buf = cupyx.empty_pinned((nmo, nmo, max_kblk), dtype=np.complex128, order="C")
         pq_real_buf = cupyx.empty_pinned((nmo, nmo, max_real_kblk), dtype=np.float64, order="C")
         pq_debug_sum_buf = (
             cupyx.empty_pinned((nmo, nmo, max_kblk), dtype=np.complex128, order="C")
             if debug_imag_check else None
         )
+        pq_real_d_buf = cp.empty((nov_tot * max_real_kblk,), dtype=np.float64)
+        if ncore > 0:
+            cm_blk_buf = cp.empty((ncore * nmo * max_kblk,), dtype=np.complex128)
+            cm_sum_buf = cp.empty((ncore * nmo * max_kblk,), dtype=np.complex128)
+            cm_rows_d_buf = cp.empty((max_real_kblk * ncore * nmo,), dtype=np.float64)
+            cc_trace_buf = cp.empty((max_kblk,), dtype=np.complex128)
+            cc_sum_buf = cp.empty((max_kblk,), dtype=np.complex128)
+            cc_real_d_buf = cp.empty((max_real_kblk,), dtype=np.float64)
+        else:
+            cm_blk_buf = None
+            cm_sum_buf = None
+            cm_rows_d_buf = None
+            cc_trace_buf = None
+            cc_sum_buf = None
+            cc_real_d_buf = None
     else:
+        q_j3c_z_buf = None
+        cderi_q_pair_buf = None
+        cderi_q_full_buf = None
         cderi_q_full_host_buf = None
         cderi_q_batch_host_buf = None
+        tmp_left_buf = None
+        pq_blk_buf = None
         pq_host_buf = None
         pq_real_buf = None
         pq_debug_sum_buf = None
+        pq_real_d_buf = None
+        cm_blk_buf = None
+        cm_sum_buf = None
+        cm_rows_d_buf = None
+        cc_trace_buf = None
+        cc_sum_buf = None
+        cc_real_d_buf = None
 
     svd_compress_aux = int(DEFAULT_SVD_COMPRESS_AUX)
     svd_buffer_aux = max(1, min(int(total_naux_real), svd_compress_aux))
@@ -1862,10 +2013,10 @@ def eri_high_level_solver_incore_with_jk(
         max_aux_eigh=svd_buffer_aux,
         max_aux_out=svd_buffer_aux,
     )
-    canonical_cderi_cpu = cupyx.empty_pinned((nov_tot, total_naux_real), dtype=np.float64, order="C")
-    aux_write_pos = 0
+    active_cderi_cpu = None
     vj_gpu = cp.zeros((nov_tot, 1), dtype=np.float64)
     vk_gpu = cp.zeros((nmo, nmo), dtype=np.float64)
+    processed_aux_blocks = 0
 
     for j2c_idx, (k_aux, _k_aux_conj, ki_idx, kj_idx) in enumerate(kpt_iters):
         weight = int(weights[k_aux])
@@ -1918,13 +2069,15 @@ def eri_high_level_solver_incore_with_jk(
             eval_ft=eval_ft,
             Gv=Gv,
             kpts=kpts,
+            q_j3c_z_buf=q_j3c_z_buf,
+            cderi_q_pair_buf=cderi_q_pair_buf,
             cderi_q_full_host_buf=cderi_q_full_host_buf,
             cderi_q_batch_host_buf=cderi_q_batch_host_buf,
             debug_sync=debug_sync,
         )
-        _free_current_eri_pool_blocks()
-        # Keep the persisted aux-column order independent of KBLKSIZE.
-        q_aux_base = aux_write_pos
+        cp.cuda.get_current_stream().synchronize()
+        lib.free_all_blocks()
+        import ipdb; ipdb.set_trace()
         for K0 in range(0, naux_q, Kblksize):
             K1 = min(naux_q, K0 + Kblksize)
             block_len = K1 - K0
@@ -1940,9 +2093,11 @@ def eri_high_level_solver_incore_with_jk(
             else:
                 pq_debug_sum = None
             if ncore > 0:
-                cm_sum = lib.empty_from_buf(None, (ncore, nmo, block_len), np.complex128)
+                cm_sum = lib.empty_from_buf(
+                    cm_sum_buf, (ncore, nmo, block_len), np.complex128
+                )
                 cm_sum[:] = 0.0
-                cc_sum = lib.empty_from_buf(None, (block_len,), np.complex128)
+                cc_sum = lib.empty_from_buf(cc_sum_buf, (block_len,), np.complex128)
                 cc_sum[:] = 0.0
             else:
                 cm_sum = None
@@ -1956,7 +2111,9 @@ def eri_high_level_solver_incore_with_jk(
                 real_width,
             )
 
-            cderi_q = lib.empty_from_buf(None, (block_len, npair_total), np.complex128)
+            cderi_q = lib.empty_from_buf(
+                cderi_q_full_buf, (block_len, npair_total), np.complex128
+            )
             cderi_q.set(q_cderi_host[K0:K1])
             if debug_sync:
                 cp.cuda.get_current_stream().synchronize()
@@ -1986,7 +2143,7 @@ def eri_high_level_solver_incore_with_jk(
                 ao_pair = unpacked[ki]
 
                 tmp_left = lib.empty_from_buf(
-                    None, (nmo + ncore, block_len, nao_unpack), np.complex128
+                    tmp_left_buf, (nmo + ncore, block_len, nao_unpack), np.complex128
                 )
                 lib.contraction(
                     "Lpq",
@@ -1998,7 +2155,7 @@ def eri_high_level_solver_incore_with_jk(
                     opb="CONJ",
                 )
                 tmp_mo = tmp_left[:nmo]
-                pq_blk = lib.empty_from_buf(None, (nmo, nmo, block_len), np.complex128)
+                pq_blk = lib.empty_from_buf(pq_blk_buf, (nmo, nmo, block_len), np.complex128)
                 lib.contraction(
                     "iLq",
                     tmp_mo,
@@ -2006,44 +2163,51 @@ def eri_high_level_solver_incore_with_jk(
                     coeff_mo_gpu[int(kj)],
                     "ijL",
                     pq_blk,
-                    alpha=pair_norm,
                 )
+                pq_blk *= pair_norm
                 pq_host = lib.empty_from_buf(pq_host_buf, (nmo, nmo, block_len), np.complex128)
                 pq_blk.get(out=pq_host, blocking=True)
-                pq_blk = None
                 if weight == 1 and debug_imag_check:
                     pq_debug_sum += pq_host
                 _accumulate_real_aux_channels(pq_real, pq_host, weight=weight, sqrt2=sqrt2)
-                pq_host = None
 
                 if ncore > 0:
                     tmp_core = tmp_left[nmo:]
+                    cm_blk = lib.empty_from_buf(
+                        cm_blk_buf, (ncore, nmo, block_len), np.complex128
+                    )
                     lib.contraction(
                         "iLq",
                         tmp_core,
                         "qj",
                         coeff_mo_gpu[int(kj)],
                         "ijL",
-                        cm_sum,
-                        alpha=pair_norm,
-                        beta=1.0,
+                        cm_blk,
                     )
+                    cm_blk *= pair_norm
+                    cm_sum += cm_blk
 
+                    cc_trace = lib.empty_from_buf(
+                        cc_trace_buf, (block_len,), np.complex128
+                    )
                     lib.contraction(
                         "iLq",
                         tmp_core,
                         "qi",
                         coeff_core_gpu[int(kj)],
                         "L",
-                        cc_sum,
-                        alpha=pair_norm,
-                        beta=1.0,
+                        cc_trace,
                     )
+                    cc_trace *= pair_norm
+                    cc_sum += cc_trace
 
-                    tmp_core = None
+                    cm_blk = None
+                    cc_trace = None
 
                 tmp_left = None
                 tmp_mo = None
+                pq_blk = None
+                pq_host = None
                 ao_pair = None
 
             unpacked = None
@@ -2055,43 +2219,35 @@ def eri_high_level_solver_incore_with_jk(
                 )
                 pq_debug_sum = None
 
+            processed_aux_blocks += 1
             pq_real_cpu = pq_real.reshape(nov_tot, real_width)
-            if weight == 1:
-                canonical_cderi_cpu[:, q_aux_base + K0:q_aux_base + K1] = pq_real_cpu
-            elif weight == 2:
-                real_dst = slice(q_aux_base + K0, q_aux_base + K1)
-                imag_dst = slice(q_aux_base + naux_q + K0, q_aux_base + naux_q + K1)
-                canonical_cderi_cpu[:, real_dst] = pq_real_cpu[:, :block_len]
-                canonical_cderi_cpu[:, imag_dst] = pq_real_cpu[:, block_len:real_width]
-            else:
-                raise ValueError(f"Unsupported time-reversal weight {weight}")
             if ncore > 0:
-                pq_real_d = lib.empty_from_buf(None, (nov_tot, real_width), np.float64)
+                pq_real_d = lib.empty_from_buf(
+                    pq_real_d_buf, (nov_tot, real_width), np.float64
+                )
                 pq_real_d.set(pq_real_cpu)
-                # pq_real_cpu is a pinned view reused by the next K block; the H2D copy
-                # must finish before that host staging buffer can be overwritten.
-                cp.cuda.get_current_stream().synchronize()
-                if weight == 2:
-                    cc_sum *= sqrt2
-                    cm_sum *= sqrt2
 
-                cc_real_d = lib.empty_from_buf(None, (real_width, 1), np.float64)
+                cc_real_d = lib.empty_from_buf(
+                    cc_real_d_buf, (real_width, 1), np.float64
+                )
                 if weight == 1:
                     cc_real_d[:block_len, 0] = cc_sum.real
                 elif weight == 2:
-                    cc_real_d[:block_len, 0] = cc_sum.real
-                    cc_real_d[block_len:real_width, 0] = cc_sum.imag
+                    cc_real_d[:block_len, 0] = sqrt2 * cc_sum.real
+                    cc_real_d[block_len:real_width, 0] = sqrt2 * cc_sum.imag
                 else:
                     raise ValueError(f"Unsupported time-reversal weight {weight}")
                 lib.gemm(pq_real_d, cc_real_d, c=vj_gpu, beta=1.0)
 
-                cm_rows_d = lib.empty_from_buf(None, (real_width, ncore, nmo), np.float64)
+                cm_rows_d = lib.empty_from_buf(
+                    cm_rows_d_buf, (real_width, ncore, nmo), np.float64
+                )
                 cm_sum_Lij = cm_sum.transpose(2, 0, 1)
                 if weight == 1:
                     cm_rows_d[:block_len] = cm_sum_Lij.real
                 elif weight == 2:
-                    cm_rows_d[:block_len] = cm_sum_Lij.real
-                    cm_rows_d[block_len:real_width] = cm_sum_Lij.imag
+                    cm_rows_d[:block_len] = sqrt2 * cm_sum_Lij.real
+                    cm_rows_d[block_len:real_width] = sqrt2 * cm_sum_Lij.imag
                 else:
                     raise ValueError(f"Unsupported time-reversal weight {weight}")
                 cm_rows_2d = cm_rows_d.reshape(real_width * ncore, nmo)
@@ -2102,53 +2258,46 @@ def eri_high_level_solver_incore_with_jk(
                 cm_sum_Lij = None
                 cm_rows_d = None
 
-            pq_real_cpu = None
+            active_cderi_cpu = append_canonical_aux_block(
+                active_cderi_cpu,
+                pq_real_cpu,
+                svd_tol=svd_tol,
+                buffers=svd_buffers,
+                logger=log,
+                label="eri_high_level_solver_incore_with_jk incremental",
+                compress_aux=svd_compress_aux,
+                finalize=(processed_aux_blocks == total_aux_blocks),
+            )
             cm_sum = None
             cc_sum = None
 
         q_cderi_host = None
-        aux_write_pos += weight * naux_q
 
         if weight == 1 and debug_imag_check:
             _log_self_conj_imag_result(
                 log, "cderi", k_aux, pq_imag_max, pq_imag_real_max, imag_tol, pq_imag_info
             )
 
-        _free_current_eri_pool_blocks()
+        cp.cuda.get_current_stream().synchronize()
+        lib.free_all_blocks()
+        gc.collect()
 
-    if aux_write_pos != total_naux_real:
-        raise RuntimeError(
-            f"Filled auxiliary width {aux_write_pos}, expected {total_naux_real}"
-        )
-    compressed_cderi_chunks = compress_canonical_aux_matrix_in_aux_chunks(
-        canonical_cderi_cpu,
-        svd_tol=svd_tol,
-        buffers=svd_buffers,
-        logger=log,
-        label="eri_high_level_solver_incore_with_jk",
-        compress_aux=svd_compress_aux,
-        return_chunks=True,
-    )
-    canonical_cderi_cpu = None
-    gc.collect()
-    compressed_cderi_cpu = concatenate_canonical_aux_chunks(
-        compressed_cderi_chunks,
-        nov_tot=nov_tot,
-    )
-    compressed_cderi_chunks = None
-    gc.collect()
-    cderi_cut = format_canonical_aux_for_solver(compressed_cderi_cpu, solver_type="CCSD")
+    cderi_cut = format_canonical_aux_for_solver(active_cderi_cpu, solver_type="CCSD")
 
     vj = vj_gpu.get(blocking=True).reshape(nmo, nmo)
     vk = vk_gpu.get(blocking=True)
 
     del coeff_mo_gpu, coeff_core_gpu, coeff_left_gpu, aux_coeffs, cd_j2c_cache, eval_j3c, ao_pair_offsets
     del expLk_full, expLk_conjz_full, bas_ij_aggregated, kpt_iters, stored_kpts, pair_address
-    del cderi_q_full_host_buf, cderi_q_batch_host_buf
-    del pq_host_buf, pq_real_buf, pq_debug_sum_buf
+    del q_j3c_z_buf, cderi_q_pair_buf, cderi_q_full_buf, cderi_q_full_host_buf, cderi_q_batch_host_buf
+    del tmp_left_buf, pq_blk_buf, pq_host_buf, pq_real_buf, pq_debug_sum_buf, pq_real_d_buf
+    del cm_blk_buf, cm_sum_buf, cm_rows_d_buf
+    del cc_trace_buf, cc_sum_buf, cc_real_d_buf
     if with_long_range:
         del Gv, auxG_conj, eval_ft
-    del compressed_cderi_cpu, svd_buffers, vj_gpu, vk_gpu
-    _free_current_eri_pool_blocks()
+    del active_cderi_cpu, svd_buffers, vj_gpu, vk_gpu
+    cp.cuda.get_current_stream().synchronize()
+    lib.free_all_blocks()
+    gc.collect()
 
     return cderi_cut, vj, vk

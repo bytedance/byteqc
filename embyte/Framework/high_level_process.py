@@ -176,6 +176,10 @@ class high_level_processing:
 
             new_index = (-numpy.array(ele_diff)).argsort()
             LOBNO[:, norb_fb:] = LOBNO[:, norb_fb:][:, new_index]
+            LOBNO = LOBNO.get(blocking=True)
+
+            lib.free_all_blocks()
+            gc.collect()
 
             ele_diff = numpy.array(ele_diff)[new_index]
             EO_occupation = list(EO_occupation[:norb_fb]) + list(
@@ -208,7 +212,7 @@ class high_level_processing:
         else:
             frag_bath_size = self.PR.load_class(
                 self.PR.recorder['frag_bath_size'])
-            LOBNO = cupy.asarray(self.PR.load_class(self.PR.recorder['LOBNO']))
+            LOBNO = self.PR.load_class(self.PR.recorder['LOBNO'])
             ele_diff = self.PR.load_class(self.PR.recorder['ele_diff'])
             EO_occupation = self.PR.load_class(
                 self.PR.recorder['EO_occupation'])
@@ -276,7 +280,7 @@ class high_level_processing:
                 'The cluster %d orbitals: %d / %d in the threshold %s' %
                 (cluster_index_i, len(cluster_list), LOBNO.shape[0], th_str))
 
-            nelec_high, rdm1_core, rdm1_core_coeff = Impurity_1rdm(
+            nelec_high, rdm1_core_coeff = Impurity_1rdm(
                 cluster_list, LOBNO, EO_occupation, self.low_level_info.mol_full.nelectron)
             if 'MP2' in self.electronic_structure_solver.__name__:
                 rdm1_core_coeff = None
@@ -317,7 +321,7 @@ class high_level_processing:
                 self.PR.recorder['eri_path'][th_index] = eri_path
                 self.PR.save()
 
-            mf_fragment_mo_coeff, LOMO = high_level_solver_frag.get_cluster_coeff()
+            mf_fragment_mo_coeff = high_level_solver_frag.get_cluster_coeff()
 
             if not self.PR.recorder['solver_finish'][th_index]:
                 high_level_solver_frag.kernel()
@@ -444,7 +448,7 @@ class high_level_processing:
                     frag_equi_op = self.fragments[equi_frag_ind]['equivalent_operator']
                     AOLO = self.low_level_info.AOLO
                     LOMO = self.low_level_info.LOMO
-                    LO_BNO_clu = LOBNO[:, cluster_list].get()
+                    LO_BNO_clu = LOBNO[:, cluster_list].get(blocking=True)
                     AOMO = numpy.dot(AOLO, LOMO)
                     AO_BNO_clu = numpy.dot(AOLO, LO_BNO_clu)
 
@@ -461,7 +465,7 @@ class high_level_processing:
                     AO_MO_vir = AOMO[:, nocc_full:]
                     AO_CLU = cupy.dot(
                         cupy.asarray(AO_BNO_clu),
-                        cupy.asarray(mf_fragment_mo_coeff)).get()
+                        cupy.asarray(mf_fragment_mo_coeff)).get(blocking=True)
                     nocc_cluster = round(nelec_high // 2)
                     AO_CLU_occ = AO_CLU[:, : nocc_cluster]
                     AO_CLU_vir = AO_CLU[:, nocc_cluster:]
@@ -474,25 +478,25 @@ class high_level_processing:
                         (cupy.asarray(
                             AO_MO_occ.T),
                             cupy.asarray(S),
-                            cupy.asarray(AO_CLU_occ))).get()
+                            cupy.asarray(AO_CLU_occ))).get(blocking=True)
                     MO_vir_CLU_vir = reduce(
                         cupy.dot,
                         (cupy.asarray(
                             AO_MO_vir.T),
                             cupy.asarray(S),
-                            cupy.asarray(AO_CLU_vir))).get()
+                            cupy.asarray(AO_CLU_vir))).get(blocking=True)
                     CLU_occ_FRAG = reduce(
                         cupy.dot,
                         (cupy.asarray(
                             AO_CLU_occ.T),
                             cupy.asarray(S),
-                            cupy.asarray(AO_FRAG))).get()
+                            cupy.asarray(AO_FRAG))).get(blocking=True)
                     MO_occ_FRAG = reduce(
                         cupy.dot,
                         (cupy.asarray(
                             AO_MO_occ.T),
                             cupy.asarray(S),
-                            cupy.asarray(AO_FRAG))).get()
+                            cupy.asarray(AO_FRAG))).get(blocking=True)
                     AOLO = cupy.asarray(AOLO)
                     LO_CLU_occ = reduce(
                         cupy.dot,
