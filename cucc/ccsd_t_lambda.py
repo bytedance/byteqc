@@ -76,10 +76,7 @@ gen_abc = cupy.ElementwiseKernel(
         outc = c;
     ''', 'gen_abc')
 
-# Divided the energy and alpha in-place.
-# divided by E_ij^ab
-
-# divided by D_ijk^abc
+# Divided energy in-place.
 div_d3 = cupy.ElementwiseKernel(
     'int64 nocc, raw int32 a, raw int32 b, raw int32 c, raw T eocc, '
     'raw T evir', 'T out',
@@ -323,8 +320,11 @@ def kernel(mycc, eris=None, t1=None, t2=None, l1=None, l2=None,
     return ccsd_lambda.kernel(mycc, eris, t1, t2, l1, l2, max_cycle, tol,
                               verbose, make_intermediates, update_lambda)
 
+class _IMDS_T:
+    pass
+
 def make_intermediates(mycc, t1, t2, eris):
-    imds = ccsd_lambda.make_intermediates(mycc, t1, t2, eris)
+    imds = _IMDS_T()
     nocc, nvir = t1.shape
     nabc = nvir * (nvir + 1) * (nvir + 2) // 6
     pool = mycc.pool
@@ -350,7 +350,7 @@ def make_intermediates(mycc, t1, t2, eris):
         else: # ovvv density fitting is wrong!
             naux = ovvv.l1.shape[0]
             take01(naux * nocc, nvir, ind1, ovvv.l1, lov)
-            take010(naux, nvir, nvir, ind2, ovvv.l2, lvv) # ovvv.l2 might be in CPU?
+            take010(naux, nvir, nvir, ind2, ovvv.l2, lvv)
             lib.contraction('nlo', lov, 'nlv', lvv, 'nov', eri_ovvv)
     
     def take_ovoo(eri_ovoo,ind1,lov,lpq):
@@ -358,12 +358,9 @@ def make_intermediates(mycc, t1, t2, eris):
             take010(nocc,nvir,nocc*nocc,ind1,ovoo,eri_ovoo)
         else:
             naux = ovoo.l1.shape[0]
-            #lov = tmpbuf.empty((n, naux, nocc), 'f8')
-            #lpq = tmpbuf.empty((naux,nocc,nocc),'f8')
             take01(naux * nocc, nvir, ind1, ovoo.l1, lov)
             lpq = ovoo.l2.ascupy(buf=lpq)
             lib.contraction('nlo', lov, 'lpq', lpq, 'nopq', eri_ovoo)
-    
     
     if t2.dev == 0: # t2 can be stored in GPU
         def take010_t2(out, ind, t2, buf, isTrans=False):
@@ -423,6 +420,7 @@ def make_intermediates(mycc, t1, t2, eris):
         naux = eris.ovvv.l1.shape[0]
         unit_occ += naux * nocc * 2
         unit_occ += naux * nocc * nocc + naux * nvir
+
     blksize = min(nabc, int(memory / 8 / unit_occ))
 
     # allocate memory for intermediate tensors 
@@ -579,7 +577,7 @@ def make_intermediates(mycc, t1, t2, eris):
             lib.elementwise_trinary(mode1, input, mode2, input, 'nijk', output, gamma=1.0, alpha=-1.0, beta=-1.0)
             return output
         
-        @numba.njit(parallel=True, fastmath=True)
+        @numba.njit(parallel=True, fastmath=True, nogil=True)
         def fast_scatter_add_j1(target, idx_c, update):
             n, nocc, _, nvir = update.shape
             for i in numba.prange(nocc):
@@ -589,7 +587,7 @@ def make_intermediates(mycc, t1, t2, eris):
                         for v in range(nvir):
                             target[i, jj, c, v] += update[k, i, jj, v]
 
-        @numba.njit(parallel=True, fastmath=True)
+        @numba.njit(parallel=True, fastmath=True, nogil=True)
         def fast_scatter_add_k(target, idx_c1, idx_c2, update):
             n, nocc, _ = update.shape
             for i in numba.prange(nocc):
@@ -786,7 +784,7 @@ def make_intermediates(mycc, t1, t2, eris):
         
         add_j(abc,joovv,cpu_buf1[:n],cpu_buf2[:n],cpu_buf1_asy[:n],cpu_buf2_asy[:n])
         m = z = bufz = None
-
+    
     # calculate l2_t
     joovv = joovv + joovv.transpose(1,0,3,2) # performed on cpu
     imds.l2_t = joovv + koovv
@@ -816,6 +814,11 @@ def make_intermediates(mycc, t1, t2, eris):
 def update_lambda(mycc, t1, t2, l1, l2, eris=None, imds=None): 
     if eris is None: eris = mycc.ao2mo()
     if imds is None: imds = make_intermediates(mycc, t1, t2, eris)
+    if not hasattr(imds, 'woooo'):
+        imds_ccsd = ccsd_lambda.make_intermediates(mycc, t1, t2, eris)
+        for k, v in imds_ccsd.__dict__.items():
+            setattr(imds, k, v)
+
     l1, l2 = ccsd_lambda.update_lambda(mycc, t1, t2, l1, l2, eris, imds)
     l1 += imds.l1_t
     l2 += imds.l2_t
