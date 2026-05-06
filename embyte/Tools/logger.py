@@ -21,6 +21,7 @@ import _pickle as pickle
 import json
 import h5py
 import numpy
+import shutil
 
 
 class Logger(object):
@@ -67,6 +68,19 @@ class Logger(object):
         if recover:
             self.logger.info('-------------------------recover---------------')
 
+    def close(self):
+        for handler in list(self.logger.handlers):
+            try:
+                handler.flush()
+            except Exception:
+                pass
+            try:
+                handler.close()
+            except Exception:
+                pass
+            self.logger.removeHandler(handler)
+        logging.Logger.manager.loggerDict.pop(self.logger.name, None)
+
 
 class Process_Record:
     def __init__(self, filename, chk_point):
@@ -111,13 +125,12 @@ class Process_Record:
     def save_class(self, class_obj, filename):
 
         with open(filename, 'wb') as f:
-            str_obj = pickle.dumps(class_obj)
-            f.write(str_obj)
+            pickle.dump(class_obj, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     def load_class(self, filename):
 
         with open(filename, 'rb') as f:
-            rq = pickle.loads(f.read())
+            rq = pickle.load(f)
             return rq
 
 
@@ -147,14 +160,77 @@ class Process_Record_cluster:
     def save_class(self, class_obj, filename):
 
         with open(filename, 'wb') as f:
-            str_obj = pickle.dumps(class_obj)
-            f.write(str_obj)
+            pickle.dump(class_obj, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     def load_class(self, filename):
 
         with open(filename, 'rb') as f:
-            rq = pickle.loads(f.read())
+            rq = pickle.load(f)
             return rq
+
+    def _filemp_block_size(self, shape):
+        from byteqc import lib
+
+        nproc = max(int(getattr(lib, 'NumFileProcess', 1)), 1)
+        return (max(int((shape[0] + nproc - 1) // nproc), 1),)
+
+    def save_array_mp(self, obj, obj_name, dataset_name='array'):
+        from byteqc import lib
+        from multiprocessing import Pool
+
+        self.recorder[obj_name] = self.filepath + '/' + obj_name
+        self.save()
+        self.delet_obj(obj_name)
+
+        try:
+            import cupy
+            is_gpu_array = isinstance(obj, cupy.ndarray)
+        except Exception:
+            is_gpu_array = False
+
+        if is_gpu_array:
+            arr_cpu = obj.get(blocking=True)
+        else:
+            arr_cpu = numpy.asarray(obj)
+        if not arr_cpu.flags.c_contiguous:
+            arr_cpu = numpy.ascontiguousarray(arr_cpu)
+
+        with lib.FileMp(self.recorder[obj_name], 'w') as filemp:
+            dataset = filemp.create_dataset(
+                dataset_name,
+                shape=arr_cpu.shape,
+                dtype=arr_cpu.dtype,
+                blksizes=self._filemp_block_size(arr_cpu.shape),
+            )
+            pool = Pool(processes=max(int(lib.NumFileProcess), 1))
+            try:
+                waits = dataset.setitem(numpy.s_[:], arr_cpu, pool=pool)
+                for wait in waits:
+                    wait.wait()
+            finally:
+                pool.close()
+                pool.join()
+        del arr_cpu
+
+    def load_array_mp(self, filename, dataset_name='array'):
+        from byteqc import lib
+        from multiprocessing import Pool
+        import cupyx
+
+        try:
+            with lib.FileMp(filename, 'r') as filemp:
+                dataset = filemp[dataset_name]
+                buf = cupyx.empty_pinned(dataset.shape, dtype=dataset.dtype)
+                pool = Pool(processes=max(int(lib.NumFileProcess), 1))
+                try:
+                    arr = dataset.getitem(numpy.s_[:], pool=pool, buf=buf)
+                    arr.wait()
+                finally:
+                    pool.close()
+                    pool.join()
+            return buf
+        except (OSError, KeyError, ValueError, TypeError):
+            return self.load_class(filename)
 
     def save_obj(self, obj, obj_name):
         self.recorder[obj_name] = self.filepath + '/' + obj_name
@@ -171,6 +247,19 @@ class Process_Record_cluster:
     def delet_obj(self, obj_name):
         path = os.path.join(self.filepath, obj_name)
         try:
+            with h5py.File(path, 'r') as f:
+                for value in f.values():
+                    if not hasattr(value, 'dtype'):
+                        continue
+                    if value.dtype.char == 'O' and value.shape == ():
+                        marker = value[()]
+                        if isinstance(marker, bytes) and marker[:15] == b'#!*DatasetMp*!#':
+                            shutil.rmtree(str(marker[15:], 'utf-8'), ignore_errors=True)
+        except BaseException:
+            pass
+        try:
             os.remove(path)
         except BaseException:
             pass
+        dirname, basename = os.path.split(path)
+        shutil.rmtree(os.path.join(dirname, basename.rsplit('.', 1)[0] + '_Mp'), ignore_errors=True)

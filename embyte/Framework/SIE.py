@@ -539,6 +539,10 @@ class SIE_kernel:
             def wait_return(node_ind, conn, part_list):
                 if node_ind == 0:
                     frag_corr_test, used_orb_num_temp_test = conn.recv()
+                    try:
+                        conn.close()
+                    except BaseException:
+                        pass
                 else:
                     frag_corr_test, used_orb_num_temp_test = comm.recv(
                         source=node_ind, tag=0)
@@ -605,6 +609,7 @@ class SIE_kernel:
                     except BaseException:
                         pass
                     high_level_frag.vhfopt = vhfopt
+                    gc.collect()
 
                 for equi_ind, part_list in enumerate(equi_part):
                     if self.PR.recorder['Cluster'][equi_ind]:
@@ -646,6 +651,9 @@ class SIE_kernel:
                     del high_level_frag.vhfopt, vhfopt
                 except BaseException:
                     pass
+                high_level_frag.cleanup_cluster_state()
+                high_level_frag = None
+                gc.collect()
 
             self.used_orb_num = numpy.asarray(
                 self.used_orb_num) / len(self.equivalent_list)
@@ -787,6 +795,10 @@ class SIE_kernel:
                                     equi_pair_group, equi_pair_group_ind, conn):
                     if node_ind == 0:
                         e_corr_rdm1_result, doo_list, dvv_list, dov_list = conn.recv()
+                        try:
+                            conn.close()
+                        except BaseException:
+                            pass
                     else:
                         e_corr_rdm1_result, doo_list, dvv_list, dov_list = comm2.recv(
                             source=node_ind, tag=0)
@@ -1265,9 +1277,8 @@ class SIE_kernel:
                 part_list = comm.recv(source=0, tag=rank)
                 if part_list:
                     if high_level_frag.vhfopt is None and high_level_frag.eri is None:
-                        f = open(low_level_info_class_add, 'rb')
-                        low_level_info = pickle.loads(f.read())
-                        f.close()
+                        with open(low_level_info_class_add, 'rb') as f:
+                            low_level_info = pickle.load(f)
                         vhfopt = VHFOpt3c(
                             low_level_info.mol_full, low_level_info.auxmol, 'int2e')
                         vhfopt.build(
@@ -1286,16 +1297,24 @@ class SIE_kernel:
                         high_level_frag.vhfopt = vhfopt
 
                         del low_level_info
+                        gc.collect()
 
                     try:
                         frag_corr_test, used_orb_num_temp_test = high_level_frag.kernel(
                             part_list[0])
-                        comm.send(
-                            [frag_corr_test, used_orb_num_temp_test], dest=0, tag=0)
+                        result = [frag_corr_test, used_orb_num_temp_test]
                     except Exception as e:
-                        high_level_frag.LG.logger.info(e)
-                        high_level_frag.LG.logger.info(traceback.format_exc())
-                        comm.send([False, False], dest=0, tag=0)
+                        logger = getattr(getattr(high_level_frag, 'LG', None), 'logger', None)
+                        if logger is not None:
+                            logger.info(e)
+                            logger.info(traceback.format_exc())
+                        else:
+                            print(e)
+                            print(traceback.format_exc())
+                        result = [False, False]
+                    finally:
+                        high_level_frag.cleanup_cluster_state()
+                    comm.send(result, dest=0, tag=0)
                 else:
                     print('Node %s break the solver loop!' % (rank))
                     break
@@ -1303,6 +1322,9 @@ class SIE_kernel:
                 del high_level_frag.vhfopt, vhfopt
             except BaseException:
                 pass
+            high_level_frag.cleanup_cluster_state()
+            high_level_frag = None
+            gc.collect()
             print('Node %s start the 1-RDM loop!' % (rank))
             t2_y_buffer_pool = cupyx.zeros_pinned(
                 (self.t2_y_buffer_pool_size, ), dtype='float64')
@@ -1330,11 +1352,23 @@ def task(high_level_frag, part_list, conn):
     try:
         frag_corr_test, used_orb_num_temp_test = high_level_frag.kernel(
             part_list[0])
-        conn.send([frag_corr_test, used_orb_num_temp_test])
+        result = [frag_corr_test, used_orb_num_temp_test]
     except Exception as e:
-        high_level_frag.LG.logger.info(e)
-        high_level_frag.LG.logger.info(traceback.format_exc())
-        conn.send([False, False])
+        logger = getattr(getattr(high_level_frag, 'LG', None), 'logger', None)
+        if logger is not None:
+            logger.info(e)
+            logger.info(traceback.format_exc())
+        else:
+            print(e)
+            print(traceback.format_exc())
+        result = [False, False]
+    finally:
+        high_level_frag.cleanup_cluster_state()
+    conn.send(result)
+    try:
+        conn.close()
+    except BaseException:
+        pass
 
 
 def task_rdm(params, cheat_th, conn):
@@ -1345,3 +1379,7 @@ def task_rdm(params, cheat_th, conn):
         cheat_th=cheat_th, t2_y_buffer_pool=t2_y_buffer_pool, if_l2=if_l2)
 
     conn.send([corr_energy_list, doo_list, dvv_list, dov_list])
+    try:
+        conn.close()
+    except BaseException:
+        pass

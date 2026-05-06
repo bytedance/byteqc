@@ -58,14 +58,41 @@ class high_level_processing:
         self.eri = None
         self.equivalent_list = None
 
+    def cleanup_cluster_state(self):
+        lg = getattr(self, 'LG', None)
+        if lg is not None and hasattr(lg, 'close'):
+            try:
+                lg.close()
+            except Exception:
+                pass
+
+        for attr in (
+                'low_level_info', 'LG', 'PR', 'cluster_index_i', 'logfile_i',
+                'equi_frag', 'symm_op', 'symm_op_t', 'symm_op_class'):
+            if hasattr(self, attr):
+                setattr(self, attr, None)
+
+        try:
+            cupy.cuda.get_current_stream().synchronize()
+        except Exception:
+            pass
+        try:
+            lib.free_all_blocks()
+        except Exception:
+            pass
+        try:
+            cupy.get_default_pinned_memory_pool().free_all_blocks()
+        except Exception:
+            pass
+        gc.collect()
+
     def kernel(self, cluster_index_i):
         '''
         Do the high-level calculation for the fragment with the index of cluster_index_i.
         '''
         import pickle
-        f = open(self.low_level_info_add, 'rb')
-        self.low_level_info = pickle.loads(f.read())
-        f.close()
+        with open(self.low_level_info_add, 'rb') as f:
+            self.low_level_info = pickle.load(f)
 
         lib.free_all_blocks()
 
@@ -185,7 +212,7 @@ class high_level_processing:
             EO_occupation = list(EO_occupation[:norb_fb]) + list(
                 numpy.array(EO_occupation[norb_fb:])[new_index])
 
-            self.PR.save_obj(LOBNO, 'LOBNO')
+            self.PR.save_array_mp(LOBNO, 'LOBNO')
             self.PR.save_obj(ele_diff, 'ele_diff')
             self.PR.save_obj(EO_occupation, 'EO_occupation')
             self.PR.save_obj(cluster_list, 'cluster_list')
@@ -212,7 +239,7 @@ class high_level_processing:
         else:
             frag_bath_size = self.PR.load_class(
                 self.PR.recorder['frag_bath_size'])
-            LOBNO = self.PR.load_class(self.PR.recorder['LOBNO'])
+            LOBNO = self.PR.load_array_mp(self.PR.recorder['LOBNO'])
             ele_diff = self.PR.load_class(self.PR.recorder['ele_diff'])
             EO_occupation = self.PR.load_class(
                 self.PR.recorder['EO_occupation'])
