@@ -511,8 +511,7 @@ class low_level_info:
 
         self.mol_full = mol
 
-        mempool = cupy.get_default_memory_pool()
-        mempool.free_all_blocks()
+        lib.free_all_blocks()
 
         blksize = int((lib.gpu_avail_bytes() / (8 * 2)) ** (1 / 3))
         if with_eri is False and getattr(mol, 'pbc_intor', None) is None:
