@@ -358,9 +358,18 @@ def build_krmp2_ovl(
                 for a0 in range(0, naux_positive, q_aux_blksize)
             ]
             read_futures = [None] * read_slots
+            read_slot_events = [None] * read_slots
+
+            def wait_read_slot(slot_id):
+                event = read_slot_events[slot_id]
+                if event is not None:
+                    event.synchronize()
+                    read_slot_events[slot_id] = None
+
             if slice_ranges:
                 a0, a1 = slice_ranges[0]
                 aux_len = int(a1 - a0)
+                wait_read_slot(0)
                 cderi_slice = lib.empty_from_buf(
                     read_host_buffers[0],
                     (aux_len, pair_cols),
@@ -388,6 +397,7 @@ def build_krmp2_ovl(
                     na0, na1 = slice_ranges[q_batch_id + 1]
                     next_aux_len = int(na1 - na0)
                     next_read_slot = read_slot ^ 1
+                    wait_read_slot(next_read_slot)
                     next_cderi_slice = lib.empty_from_buf(
                         read_host_buffers[next_read_slot],
                         (next_aux_len, pair_cols),
@@ -424,6 +434,9 @@ def build_krmp2_ovl(
                     buf=unpack_buf,
                     out=unpack_out,
                 )
+                read_done = cp.cuda.Event()
+                read_done.record()
+                read_slot_events[read_slot] = read_done
 
                 if pending_writes[slot] is not None:
                     for waits in pending_writes[slot]:
@@ -516,6 +529,9 @@ def build_krmp2_ovl(
                 ]
 
                 del cderi_slice, unpacked
+            for event in read_slot_events:
+                if event is not None:
+                    event.synchronize()
             finished_aux_batches += q_batch_total
 
         for waits in pending_writes:

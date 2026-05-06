@@ -731,13 +731,27 @@ def kernel(
             next_task = next(tasks, None)
             active_slot = 0
             idle_slot = 1
+            host_slot_events = [None, None]
+
+            def wait_host_slot(slot_id):
+                event = host_slot_events[slot_id]
+                if event is not None:
+                    event.synchronize()
+                    host_slot_events[slot_id] = None
+
+            def mark_host_slot_done(slot_id):
+                event = cp.cuda.Event()
+                event.record()
+                host_slot_events[slot_id] = event
 
             if next_task is not None:
+                wait_host_slot(active_slot)
                 prefetched[active_slot] = queue_read_slot(active_slot, next_task)
                 next_task = next(tasks, None)
 
             while prefetched[active_slot] is not None:
                 if next_task is not None:
+                    wait_host_slot(idle_slot)
                     prefetched[idle_slot] = queue_read_slot(idle_slot, next_task)
                     next_task = next(tasks, None)
 
@@ -759,9 +773,14 @@ def kernel(
                 ibL.set(ib_h)
                 jaL.set(ja_h)
                 accumulate_exchange(task, t2_iajb, ibL, jaL)
+                mark_host_slot_done(active_slot)
 
                 prefetched[active_slot] = None
                 active_slot, idle_slot = idle_slot, active_slot
+
+            for event in host_slot_events:
+                if event is not None:
+                    event.synchronize()
         else:
             for ki in range(nkpts):
                 ni = int(nocc_by_kpt[ki])
