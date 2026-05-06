@@ -17,7 +17,7 @@ import logging
 from logging import handlers
 import os
 import re
-import _pickle as pickle
+import pickle
 import json
 import h5py
 import numpy
