@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import gc
 import os
+import shutil
 import tempfile
 from multiprocessing import Pool
 from typing import Optional
@@ -40,6 +41,36 @@ WRITE_PROCESSSES = 1
 READ_PROCESSSES = 8
 
 
+def remove_krmp2_file_record(record, log=None, label="KRMP2 FileMp record"):
+    """Remove the FileMp h5 file and its side-car `_Mp` directory."""
+
+    if record is None:
+        return []
+
+    file_path = record.get("file")
+    if not file_path:
+        return []
+
+    mp_path = os.path.splitext(file_path)[0] + "_Mp"
+    removed = []
+    for path in (file_path, mp_path):
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+                removed.append(path)
+            elif os.path.exists(path):
+                os.remove(path)
+                removed.append(path)
+        except FileNotFoundError:
+            continue
+
+    if removed:
+        record["_file_removed"] = True
+        if log is not None:
+            log.info("%s removed: %s", label, ", ".join(removed))
+    return removed
+
+
 def build_krmp2_ovl(
     cderi_record,
     mo_coeff,
@@ -50,11 +81,14 @@ def build_krmp2_ovl(
     file_processes: int = WRITE_PROCESSSES,
     read_processes: int = READ_PROCESSSES,
     occ_blksize: Optional[int] = None,
+    remove_cderi_after_ovl: bool = True,
 ) -> dict:
     """Transform the current KRMP2 CDERI record to disk-backed ovL datasets.
 
     The returned record stores one FileMp dataset per `(ki, ka)` pair, with
     logical shape `(nocc_ki, nvir_ka, naux_q)`.
+    If `remove_cderi_after_ovl` is true, the input CDERI FileMp h5 file and
+    side-car `_Mp` directory are removed after ovL is built successfully.
     """
 
     ao_cell = cderi_record.get("ao_cell", cderi_record["cell"])
@@ -565,6 +599,9 @@ def build_krmp2_ovl(
         lib.free_all_blocks()
         cp.get_default_pinned_memory_pool().free_all_blocks()
         gc.collect()
+
+    if remove_cderi_after_ovl:
+        remove_krmp2_file_record(cderi_record, log=log, label="KRMP2 CDERI record")
 
     return {
         "ovL": ovl_names,

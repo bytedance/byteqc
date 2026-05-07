@@ -40,6 +40,7 @@ from byteqc.cump2.dfmp2_2 import div_t2 as _div_t2_real
 from byteqc.cump2.krmp2_ovl import (
     build_krmp2_ovl as _build_krmp2_ovl_record,
     read_krmp2_ovl_kpair,
+    remove_krmp2_file_record,
 )
 from byteqc.lib.utils import is_pinned
 
@@ -238,6 +239,8 @@ def build_and_load_krmp2_ovl(
     file_processes=None,
     read_processes=None,
     occ_blksize: Optional[int] = None,
+    remove_cderi_after_ovl: bool = True,
+    remove_ovl_after_load: bool = True,
 ) -> dict:
     """Build disk-backed ovL through the existing path, then load it."""
 
@@ -253,6 +256,7 @@ def build_and_load_krmp2_ovl(
         "aux_blksize": aux_blksize,
         "path": path,
         "occ_blksize": occ_blksize,
+        "remove_cderi_after_ovl": bool(remove_cderi_after_ovl),
     }
     if file_processes is not None:
         kwargs["file_processes"] = int(file_processes)
@@ -267,6 +271,8 @@ def build_and_load_krmp2_ovl(
         **kwargs,
     )
     ovl = load_krmp2_ovl(ovl_record, device=device)
+    if remove_ovl_after_load:
+        remove_krmp2_file_record(ovl_record, label="KRMP2 ovL record")
     return {
         "ovl": ovl,
         "ovl_record": ovl_record,
@@ -292,6 +298,8 @@ def kernel(
     ovl_file_processes=None,
     ovl_read_processes=None,
     ovl_occ_blksize: Optional[int] = None,
+    remove_cderi_after_ovl: bool = True,
+    remove_ovl_after_kernel: bool = True,
 ):
     """Compute KRMP2 correlation energy on GPU from occupied-sliced ovL blocks.
 
@@ -307,6 +315,12 @@ def kernel(
             `(nocc_ki, nvir_ka, naux_q)`. Blocks may live on host or device.
         cderi_record / ovl_record: Convenience inputs for building/loading the
             disk-backed ovL record consumed by the occupied-sliced kernel.
+        remove_cderi_after_ovl: If `True`, remove `cderi_record["file"]` and
+            its FileMp side-car directory immediately after a new ovL record is
+            built from `cderi_record`.
+        remove_ovl_after_kernel: If `True`, remove `ovl_record["file"]` and
+            its FileMp side-car directory after the disk-backed KRMP2 kernel
+            finishes successfully.
     """
 
     kpts = np.asarray(kpts, dtype=float)
@@ -323,6 +337,7 @@ def kernel(
                 "aux_blksize": ovl_aux_blksize,
                 "path": ovl_path,
                 "occ_blksize": ovl_occ_blksize,
+                "remove_cderi_after_ovl": bool(remove_cderi_after_ovl),
             }
             if ovl_file_processes is not None:
                 ovl_build_kwargs["file_processes"] = int(ovl_file_processes)
@@ -869,6 +884,7 @@ def kernel(
         lib.free_all_blocks()
         cp.get_default_pinned_memory_pool().free_all_blocks()
 
+    emp2_per_unitcell = float(emp2.real.get()) / nkpts
     log.info(
         "KRMP2 GPU kernel done: processed_unique_kpairs=%d/%d "
         "processed_unique_occ_pair_blocks=%d/%d processed_unique_ka_tasks=%d/%d "
@@ -883,7 +899,10 @@ def kernel(
         total_kpairs_logical,
         total_occ_pair_blocks_logical,
         total_ka_tasks_logical,
-        float(emp2.real.get()) / nkpts,
+        emp2_per_unitcell,
     )
 
-    return float(emp2.real.get()) / nkpts
+    if remove_ovl_after_kernel and ovl is None and ovl_record is not None:
+        remove_krmp2_file_record(ovl_record, log=log, label="KRMP2 ovL record")
+
+    return emp2_per_unitcell
