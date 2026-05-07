@@ -62,7 +62,7 @@ from gpu4pyscf.pbc.lib.kpts_helper import conj_images_in_bvk_cell, kk_adapted_it
 from gpu4pyscf.pbc.tools.k2gamma import kpts_to_kmesh
 from gpu4pyscf.pbc.tools.pbc import _Gv_wrap_around, get_coulG
 
-WRITE_PROCESSSES = 2
+WRITE_PROCESSSES = 1
 READ_PROCESSSES = 8
 
 def _to_numpy_array(arr, dtype=None) -> np.ndarray:

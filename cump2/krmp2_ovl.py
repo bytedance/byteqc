@@ -36,8 +36,8 @@ from gpu4pyscf.lib import logger
 from gpu4pyscf.pbc.df import rsdf_builder
 from gpu4pyscf.pbc.lib.kpts_helper import conj_images_in_bvk_cell
 
-WRITE_PROCESSSES = 4
-READ_PROCESSSES = 4
+WRITE_PROCESSSES = 1
+READ_PROCESSSES = 8
 
 
 def build_krmp2_ovl(
@@ -309,7 +309,7 @@ def build_krmp2_ovl(
                 ovl_names[ki, ka],
                 (nocc_ki, nvir_ka, naux_q),
                 dtype=np.complex128,
-                blksizes=(tuple(occ_blocks), nvir_ka, tuple(aux_blocks)),
+                blksizes=(nocc_ki, nvir_ka, tuple(aux_blocks)),
             )
             ovl_datasets[ki, ka] = dataset
 
