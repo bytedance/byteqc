@@ -20,7 +20,7 @@ from gpu4pyscf.pbc.df.rsdf_builder import (
 from gpu4pyscf.pbc.lib.kpts_helper import conj_images_in_bvk_cell, kk_adapted_iter
 from gpu4pyscf.pbc.tools.k2gamma import kpts_to_kmesh
 from gpu4pyscf.pbc.tools.pbc import _Gv_wrap_around, get_coulG
-
+cp.cuda.set_pinned_memory_allocator(None)
 
 AO_PAIR_BATCH_SIZE_1 = 256 * 256
 GBLKSIZE_1 = 1024 * 4
@@ -55,6 +55,7 @@ def _with_eri_memory_pool(func):
             cp.cuda.get_current_stream().synchronize()
             pool.free_all_blocks()
             _ERI_MEMORY_POOL_STACK.pop()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
             lib.free_all_blocks()
             del pool
             gc.collect()
