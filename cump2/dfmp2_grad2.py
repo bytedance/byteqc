@@ -17,6 +17,12 @@ import numpy
 import cupy
 import tempfile
 import os
+
+# TODO(BACKEND LIMITATION - MP2 GRADIENT):
+# The MP2 gradient backend is currently only validated with gpu4pyscf==1.3.4.
+# Newer gpu4pyscf releases appear to change cell-orbital ordering in a way that
+# can produce incorrect gradients.  This path needs a backend-independent
+# orbital-ordering fix before supporting newer gpu4pyscf versions.
 try:
     from gpu4pyscf import scf as gpuscf
 except ImportError:

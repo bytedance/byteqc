@@ -20,6 +20,11 @@ from gpu4pyscf.pbc.df.rsdf_builder import (
 from gpu4pyscf.pbc.lib.kpts_helper import conj_images_in_bvk_cell, kk_adapted_iter
 from gpu4pyscf.pbc.tools.k2gamma import kpts_to_kmesh
 from gpu4pyscf.pbc.tools.pbc import _Gv_wrap_around, get_coulG
+
+# TODO(BACKEND LIMITATION - K-POINT PBC):
+# All current k-point PBC ERI paths in this module require CUDA 13.  Starting
+# with CUDA 13, cuSOLVER eigenvalue routines can handle matrices larger than
+# 30000 x 30000, which is required by the large auxiliary-space reductions here.
 cp.cuda.set_pinned_memory_allocator(None)
 
 AO_PAIR_BATCH_SIZE_1 = 256 * 256

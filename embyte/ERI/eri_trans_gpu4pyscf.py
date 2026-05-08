@@ -16,6 +16,10 @@ from gpu4pyscf.pbc.df.rsdf_builder import (
     LINEAR_DEP_THR,
 )
 
+# TODO(BACKEND LIMITATION - OBC ERI):
+# The OBC ERI path in this module is maintained by ByteQC instead of delegating
+# to gpu4pyscf.  A future backend migration to gpu4pyscf is possible, but the
+# current implementation is only validated for CUDA 12 builds.
 cupy.cuda.set_pinned_memory_allocator(None)
 
 AO_PAIR_BATCH_SIZE_1 = 256 * 256
