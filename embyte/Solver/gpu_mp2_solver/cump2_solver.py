@@ -61,6 +61,23 @@ class GPU_MP2Solver():
     def __init__(self):
         self.__name__ = 'GPU_MP2Solver'
 
+    def cleanup(self):
+        for attr in (
+                'eri_general', 't2c', 'projector', 'orb_energy', 'EOMO',
+                'AOMO', 'e_corr', 'eri_file', 'vhfopt3c'):
+            if hasattr(self, attr):
+                setattr(self, attr, None)
+        try:
+            cupy.cuda.get_current_stream().synchronize()
+        except Exception:
+            pass
+        try:
+            lib.free_all_blocks()
+            cupy.get_default_pinned_memory_pool().free_all_blocks()
+        except Exception:
+            pass
+        gc.collect()
+
     def make_param(
         self,
         nelec_high,
@@ -146,6 +163,7 @@ class GPU_MP2Solver():
             # pool_rw.close()
             # pool_rw.join()
             file.close()
+            cderi = wait_list = file = None
 
         else:
             self.Logger.info(
@@ -166,6 +184,10 @@ class GPU_MP2Solver():
             pool_rw.close()
             pool_rw.join()
             file.close()
+            cderi = wait_list = pool_rw = file = None
+
+        lib.free_all_blocks()
+        gc.collect()
 
     def get_cluster_coeff(self):
 
@@ -383,6 +405,8 @@ class GPU_MP2Solver():
 
         buffer_ia_d = buffer_jb_d = buffer_t2_d = buffer_t2_c_d = buffer_t2_c_h = fvL = fvL_tmp = None
         is_aL = t2 = t2_c = tmp_t2_c_h = js_bL = None
+        lib.free_all_blocks()
+        gc.collect()
 
     def get_frag_correlation_energy(self, if_RDM=True):
         if if_RDM:

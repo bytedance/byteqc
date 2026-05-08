@@ -30,6 +30,12 @@ import cupy
 cupy.cuda.set_pinned_memory_allocator(None)
 
 
+def _impurity_nelec_only(cluster_list, core_occupied, number_active_electrons):
+    core_occupied = numpy.asarray(core_occupied).copy()
+    core_occupied[cluster_list] = 0
+    return round(number_active_electrons - numpy.sum(core_occupied))
+
+
 class high_level_processing:
 
     '''
@@ -57,8 +63,17 @@ class high_level_processing:
         self.in_situ_T = True
         self.eri = None
         self.equivalent_list = None
+        self._active_high_level_solver = None
 
     def cleanup_cluster_state(self):
+        solver = getattr(self, '_active_high_level_solver', None)
+        if solver is not None and hasattr(solver, 'cleanup'):
+            try:
+                solver.cleanup()
+            except Exception:
+                pass
+        self._active_high_level_solver = None
+
         lg = getattr(self, 'LG', None)
         if lg is not None and hasattr(lg, 'close'):
             try:
@@ -68,7 +83,8 @@ class high_level_processing:
 
         for attr in (
                 'low_level_info', 'LG', 'PR', 'cluster_index_i', 'logfile_i',
-                'equi_frag', 'symm_op', 'symm_op_t', 'symm_op_class'):
+                'equi_frag', 'symm_op', 'symm_op_t', 'symm_op_class',
+                '_active_high_level_solver'):
             if hasattr(self, attr):
                 setattr(self, attr, None)
 
@@ -307,10 +323,18 @@ class high_level_processing:
                 'The cluster %d orbitals: %d / %d in the threshold %s' %
                 (cluster_index_i, len(cluster_list), LOBNO.shape[0], th_str))
 
-            nelec_high, rdm1_core_coeff = Impurity_1rdm(
-                cluster_list, LOBNO, EO_occupation, self.low_level_info.mol_full.nelectron)
             if 'MP2' in self.electronic_structure_solver.__name__:
+                nelec_high = _impurity_nelec_only(
+                    cluster_list,
+                    EO_occupation,
+                    self.low_level_info.mol_full.nelectron)
                 rdm1_core_coeff = None
+            else:
+                nelec_high, rdm1_core_coeff = Impurity_1rdm(
+                    cluster_list,
+                    LOBNO,
+                    EO_occupation,
+                    self.low_level_info.mol_full.nelectron)
 
             if numpy.isclose(nelec_high, 0):
                 self.LG.logger.info(
@@ -318,6 +342,7 @@ class high_level_processing:
                 return 0, 0
 
             high_level_solver_frag = self.electronic_structure_solver()
+            self._active_high_level_solver = high_level_solver_frag
 
             high_level_solver_frag.make_param(nelec_high,
                                               cluster_list,
@@ -650,7 +675,10 @@ class high_level_processing:
                     (th_str, et))
                 self.LG.logger.info('--------------')
 
+            if hasattr(high_level_solver_frag, 'cleanup'):
+                high_level_solver_frag.cleanup()
             high_level_solver_frag = None
+            self._active_high_level_solver = None
             cupy.cuda.get_current_stream().synchronize()
             lib.free_all_blocks()
             gc.collect()

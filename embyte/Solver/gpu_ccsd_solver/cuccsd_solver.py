@@ -121,7 +121,61 @@ class GPU_CCSDSolver():
 
     def __init__(self):
         self.cc_fragment = None
+        self.pool = None
         self.__name__ = 'GPU_CCSDSolver'
+
+    def cleanup(self):
+        '''
+        Explicitly release large CCSD-side objects and close the BufferPool
+        HDF5 backend.  Relying on Python GC is too late for long SIE runs.
+        '''
+        pool = getattr(self, 'pool', None)
+        cc_fragment = getattr(self, 'cc_fragment', None)
+        if pool is None and cc_fragment is not None:
+            pool = getattr(cc_fragment, 'pool', None)
+
+        try:
+            cupy.cuda.get_current_stream().synchronize()
+        except Exception:
+            pass
+
+        for attr in (
+                'eris', 'eri_general', 'cluster_oei', 't1', 't2', 't1c',
+                't2c', 't1x', 'l1', 'l2', 'l1x', 'l2c', 'l2x', 'fock',
+                'LOEO', 'EOMO', 'LOMO', 'AOMO', 'projector',
+                'rdm1_core_coeff'):
+            if hasattr(self, attr):
+                setattr(self, attr, None)
+
+        if cc_fragment is not None:
+            for attr in ('t1', 't2', 'eris', 'diis'):
+                if hasattr(cc_fragment, attr):
+                    setattr(cc_fragment, attr, None)
+            if hasattr(cc_fragment, 'pool'):
+                cc_fragment.pool = None
+        self.cc_fragment = None
+
+        if pool is not None:
+            file_obj = getattr(pool, 'file', None)
+            if file_obj is not None:
+                try:
+                    if getattr(file_obj, 'id', None) is not None and file_obj.id.valid:
+                        file_obj.flush()
+                        file_obj.close()
+                except Exception:
+                    pass
+                try:
+                    pool.file = None
+                except Exception:
+                    pass
+        self.pool = None
+
+        try:
+            lib.free_all_blocks()
+            cupy.get_default_pinned_memory_pool().free_all_blocks()
+        except Exception:
+            pass
+        gc.collect()
 
     def make_param(
         self,
@@ -163,18 +217,26 @@ class GPU_CCSDSolver():
         Load/Generate a CDERI for cluster.
         '''
 
-        AOLO = cupy.asarray(low_level_info.AOLO)
-        rdm1_core_coeff = reduce(
-            cupy.dot, (AOLO, cupy.asarray(
-                self.rdm1_core_coeff)))
-        AOLO = None
+        has_core = (
+            self.rdm1_core_coeff is not None
+            and self.rdm1_core_coeff.shape[1] > 0
+        )
+        if has_core:
+            AOLO = cupy.asarray(low_level_info.AOLO)
+            rdm1_core_coeff = reduce(
+                cupy.dot, (AOLO, cupy.asarray(
+                    self.rdm1_core_coeff)))
+            AOLO = None
+        else:
+            rdm1_core_coeff = None
         self.rdm1_core_coeff = None
         lib.free_all_blocks()
+        j = k = veff = None
 
         if save_or_load:
             if self.eri_file is None:
 
-                if rdm1_core_coeff.shape[1] > 0:
+                if has_core:
                     self.eri_general, j, k, = eri_trans.eri_high_level_solver_incore_with_jk(
                         low_level_info.eri_mol,
                         low_level_info.eri_auxmol,
@@ -212,7 +274,7 @@ class GPU_CCSDSolver():
                         blocking=True)
 
             else:
-                if rdm1_core_coeff.shape[1] > 0:
+                if has_core:
                     if low_level_info.kpts is not None:
                         raise NotImplementedError(
                             'On-disk JK route is not supported when kpts is provided')
@@ -267,6 +329,7 @@ class GPU_CCSDSolver():
                 w.wait()
 
             file.close()
+            cderi = wait_list = file = None
             numpy.save(
                 os.path.join(
                     eri_path,
@@ -292,12 +355,15 @@ class GPU_CCSDSolver():
             pool_rw.close()
             pool_rw.join()
             file.close()
+            cderi = wait_list = pool_rw = file = None
             self.cluster_oei = numpy.load(
                 os.path.join(eri_path, 'cluster_oei.npy'))
 
         self.eri_general = self.eri_general.reshape(
             self.eri_general.shape[0], self.nmo, self.nmo)
-        veff = None
+        rdm1_core_coeff = j = k = veff = None
+        lib.free_all_blocks()
+        gc.collect()
 
     def get_cluster_coeff(self):
 
