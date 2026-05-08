@@ -168,15 +168,13 @@ class GPU_CCSDSolver():
             cupy.dot, (AOLO, cupy.asarray(
                 self.rdm1_core_coeff)))
         AOLO = None
+        self.rdm1_core_coeff = None
         lib.free_all_blocks()
-        rdm1_core = reduce(cupy.dot, (rdm1_core_coeff, rdm1_core_coeff.T))
-        rdm1_core_coeff = rdm1_core_coeff.get(blocking=True)
 
         if save_or_load:
             if self.eri_file is None:
 
-                if rdm1_core.any():
-                    rdm1_core = None
+                if rdm1_core_coeff.shape[1] > 0:
                     self.eri_general, j, k, = eri_trans.eri_high_level_solver_incore_with_jk(
                         low_level_info.eri_mol,
                         low_level_info.eri_auxmol,
@@ -196,7 +194,6 @@ class GPU_CCSDSolver():
                     self.cluster_oei = self.cluster_oei.get(blocking=True)
 
                 else:
-                    rdm1_core = None
                     self.eri_general = eri_trans.eri_high_level_solver_incore(
                         low_level_info.eri_mol,
                         low_level_info.eri_auxmol,
@@ -215,8 +212,7 @@ class GPU_CCSDSolver():
                         blocking=True)
 
             else:
-                if rdm1_core.any():
-                    rdm1_core = None
+                if rdm1_core_coeff.shape[1] > 0:
                     if low_level_info.kpts is not None:
                         raise NotImplementedError(
                             'On-disk JK route is not supported when kpts is provided')
@@ -237,7 +233,6 @@ class GPU_CCSDSolver():
                     self.cluster_oei = self.cluster_oei.get(blocking=True)
 
                 else:
-                    rdm1_core = None
                     if low_level_info.kpts is not None:
                         raise NotImplementedError(
                             'On-disk high-level ERI is not supported when kpts is provided')
@@ -256,7 +251,7 @@ class GPU_CCSDSolver():
                         cupy.dot, (self.LOMO.T, self.cluster_oei, self.LOMO)).get(
                         blocking=True)
 
-            # pool_rw = Pool(processes=min(lib.NumFileProcess, self.eri_general.shape[0]))
+            lib.free_all_blocks()
             file = lib.FileMp(
                 os.path.join(
                     eri_path,
@@ -265,20 +260,19 @@ class GPU_CCSDSolver():
             blk = max(int(self.eri_general.shape[0] / lib.NumFileProcess), 1)
             cderi = file.create_dataset(
                 'cderi', self.eri_general.shape, 'f8', blksizes=(blk))
-            # wait_list = cderi.setitem(
-            #     numpy.s_[:], self.eri_general, pool=pool_rw)
+
             wait_list = cderi.setitem(
                 numpy.s_[:], self.eri_general)
             for w in wait_list:
                 w.wait()
-            # pool_rw.close()
-            # pool_rw.join()
+
             file.close()
             numpy.save(
                 os.path.join(
                     eri_path,
                     'cluster_oei.npy'),
                 self.cluster_oei)
+            self.Logger.info('Save cderi and oei to disk.')
 
         else:
             self.Logger.info('Load cderi from disk path : %s' %
