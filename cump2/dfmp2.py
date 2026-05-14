@@ -25,7 +25,7 @@ from multiprocessing import Pool
 import os
 
 
-def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_rdm1=False):
+def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_rdm1=False, with_em=False):
     if verbose is None:
         verbose = mol.verbose
     log = logger.new_logger(rhf, verbose)
@@ -81,8 +81,8 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_rdm1=Fals
     lib.Mg.mapgpu(lambda: lib.free_all_blocks())
     mo_energy = rhf.mo_energy.copy()
     vslices = [slice(i[0], i[1]) for i in prange(0, nvir, vblk)]
-    e_corr, rdm1 = mp2_get_corr(
-        mol, path, oslices, nvir, nocc, auxmol.nao, mo_energy, log=log, with_rdm1=with_rdm1, vslices=vslices)
+    e_corr, rdm1, em = mp2_get_corr(
+        mol, path, oslices, nvir, nocc, auxmol.nao, mo_energy, log=log, with_rdm1=with_rdm1, vslices=vslices, with_em=with_em)
     time1 = log.timer('mp2_get_corr', *time1)
     log.timer('mp2', *time0)
 
@@ -98,8 +98,12 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_rdm1=Fals
         del file['cderi']
         file.close()
 
-    if with_rdm1:
+    if with_rdm1 and with_em:
+        return e_corr, e_corr + rhf.e_tot, rdm1, em
+    elif with_rdm1 and not with_em:
         return e_corr, e_corr + rhf.e_tot, rdm1
+    elif not with_rdm1 and with_em:
+        return e_corr, e_corr + rhf.e_tot, em
     else:
         return e_corr, e_corr + rhf.e_tot
 
@@ -234,6 +238,7 @@ def cderi_ovL_outcore(mol, auxmol, coeff_o, coeff_v,
                                 eri_d, beta=1.0)
         tmp = None
         if waits[gid]:
+            wait_loop(waits[gid])
             for w in waits[gid]:
                 w.wait()
 
@@ -276,8 +281,14 @@ def cderi_ovL_outcore(mol, auxmol, coeff_o, coeff_v,
         eri_h = lib.empty_from_buf(
             eris_h[gid], (naux_cart, so_len, nvir), 'f8')
 
-        eri.getitem(numpy.s_[:, so], pool=pools_r[gid],
-                    buf=eri_h).wait()
+        # eri.getitem(numpy.s_[:, so], pool=pools_r[gid],
+        #             buf=eri_h).wait()
+        wait_getitem = eri.getitem(numpy.s_[:, so], pool=pools_r[gid],
+                                    buf=eri_h)
+        wait_loop(wait_getitem.waits)
+        wait_getitem.wait()
+        wait_getitem = None
+
 
         eri_d = lib.empty_from_buf(eris_d[gid], eri_h.shape)
         eri_d.set(eri_h)
@@ -287,8 +298,10 @@ def cderi_ovL_outcore(mol, auxmol, coeff_o, coeff_v,
                              lower=True)
 
         if waits[gid]:
+            wait_loop(waits[gid])
             for w in waits[gid]:
                 w.wait()
+    
         cderi_h = lib.empty_from_buf(cderis_h[gid], cderi_d.shape)
         cderi_d.get(out=cderi_h, blocking=True)
         cderi_h = cderi_h.reshape(so_len, nvir, naux)
@@ -313,7 +326,9 @@ def cderi_ovL_outcore(mol, auxmol, coeff_o, coeff_v,
     return path, oslices
 
 
-def mp2_get_corr(mol, path, oslices, nvir, nocc, naux, e_mo, log=None, with_rdm1=False, vslices=None):
+
+
+def mp2_get_corr(mol, path, oslices, nvir, nocc, naux, e_mo, log=None, with_rdm1=False, vslices=None, with_em=False):
     if log is None:
         log = logger.new_logger(mol, mol.verbose)
 
@@ -436,25 +451,29 @@ def mp2_get_corr(mol, path, oslices, nvir, nocc, naux, e_mo, log=None, with_rdm1
 
     e_corr = numpy.sum(e_corr_list).item()
 
-    if with_rdm1:
+    if with_rdm1 or with_em:
         rdm1_vir_list = Mg.map(cupy.asnumpy, rdm1_vir_d)
         rdm1_vir = numpy.sum(rdm1_vir_list, axis=0)
         rdm1_vir_list = None
 
-        rdm1_occ = mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log)
+        rdm1_occ, em = mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log, with_em)
 
-        nao = nocc + nvir
-        rdm1 = lib.empty((nao, nao), 'f8', type=MemoryTypeHost)
-        rdm1[:] = 0
-        rdm1[:nocc, :nocc] = rdm1_occ + numpy.eye(nocc) * 2
-        rdm1[nocc:, nocc:] = rdm1_vir
+        if with_rdm1:
+            nao = nocc + nvir
+            rdm1 = lib.empty((nao, nao), 'f8', type=MemoryTypeHost)
+            rdm1[:] = 0
+            rdm1[:nocc, :nocc] = rdm1_occ + numpy.eye(nocc) * 2
+            rdm1[nocc:, nocc:] = rdm1_vir
+        else:
+            rdm1 = None
     else:
         rdm1 = None
+        em = None
 
-    return e_corr, rdm1
+    return e_corr, rdm1, em
 
 
-def mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log):
+def mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log, with_em=False):
 
     time0 = logger.process_clock(), logger.perf_counter()
     vblk = vslices[0].stop - vslices[0].start
@@ -464,6 +483,9 @@ def mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log):
     file.close()
 
     e_mos = Mg.broadcast(e_mo)
+
+    if with_em:
+        em_d = Mg.mapgpu(lambda: cupy.zeros((nocc, nocc), 'f8'))
 
     ias_d = Mg.mapgpu(lambda: cupy.empty((nocc, vblk, naux), 'f8'))
     jbs_d = Mg.mapgpu(lambda: cupy.empty((nocc, vblk, naux), 'f8'))
@@ -502,12 +524,20 @@ def mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log):
         t2 = gemm(ia_d.reshape((-1, naux)), ia_d.reshape((-1, naux)),
                   transb='T', buf=t2s[gid]).reshape(
             (nocc, sv_len, nocc, sv_len))
-        div_t2(t2, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv])
-
         tau = lib.empty_from_buf(tau_d[gid], t2.shape, 'f8')
-        cupy.copyto(tau, t2)
-        tau *= 2
-        tau -= t2.transpose(2, 1, 0, 3)
+        if with_em:
+            cupy.copyto(tau, t2)
+            tau *= 2
+            tau -= t2.transpose(2, 1, 0, 3)
+            div_t2(t2, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv])
+            contraction('iakb', tau, 'jakb', t2, 'ij', em_d[gid], beta=1.0)
+            div_t2(tau, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv])
+
+        else:
+            div_t2(t2, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv])
+            cupy.copyto(tau, t2)
+            tau *= 2
+            tau -= t2.transpose(2, 1, 0, 3)
         contraction('iakb', t2, 'jakb', tau, 'ij', rdm1_occ_d[gid],
                     alpha=-2.0, beta=1.0)
 
@@ -527,12 +557,22 @@ def mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log):
             t2 = gemm(ia_d.reshape((-1, naux)), jb_d.reshape((-1, naux)),
                       transb='T', buf=t2s[gid]).reshape(
                 (nocc, sv_len, nocc, sv_len2))
-            div_t2(t2, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv2])
-
             tau = lib.empty_from_buf(tau_d[gid], t2.shape, 'f8')
-            cupy.copyto(tau, t2)
-            tau *= 2
-            tau -= t2.transpose(2, 1, 0, 3)
+            if with_em:
+                cupy.copyto(tau, t2)
+                tau *= 2
+                tau -= t2.transpose(2, 1, 0, 3)
+                div_t2(t2, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv2])
+                contraction('iakb', tau, 'jakb', t2, 'ij', em_d[gid], beta=1.0)
+                contraction('kaib', tau, 'kajb', t2, 'ij', em_d[gid], beta=1.0)
+                div_t2(tau, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv2])
+
+            else:
+                div_t2(t2, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv2])
+
+                cupy.copyto(tau, t2)
+                tau *= 2
+                tau -= t2.transpose(2, 1, 0, 3)
 
             contraction('iakb', t2, 'jakb', tau, 'ij', rdm1_occ_d[gid],
                         alpha=-2.0, beta=1.0)
@@ -545,6 +585,25 @@ def mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log):
     Mg.map(MP2_occ_1rdm_kernel, range(len(vslices)))
     rdm1_occ_list = Mg.map(cupy.asnumpy, rdm1_occ_d)
     rdm1_occ = numpy.sum(rdm1_occ_list, axis=0)
+    if with_em:
+        em_list = Mg.map(cupy.asnumpy, em_d)
+        em = numpy.sum(em_list, axis=0)
+    else:
+        em = None
     ias_d = jbs_d = t2s = ias_h = jbs_h = pools = tau_d = e_mos = rdm1_occ_list = None
 
-    return rdm1_occ
+    return rdm1_occ, em
+
+
+def wait_loop(waits):
+    tmp_a = cupy.random.randn(1000, 1000)
+    tmp_b = cupy.random.randn(1000, 1000)
+    tmp_c = cupy.zeros((1000, 1000)) 
+    while True:
+        break_flag = True
+        for w in waits:
+            break_flag = break_flag and w.ready()
+        if break_flag:
+            break
+        cupy.dot(tmp_a, tmp_b, out=tmp_c)
+    tmp_a = tmp_b = tmp_c = None

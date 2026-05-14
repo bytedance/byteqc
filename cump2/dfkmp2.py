@@ -111,7 +111,7 @@ def kernel(mol, rhf, auxbasis=None, verbose=None,
     
 
     vslices = [slice(i[0], i[1]) for i in prange(0, nvir, vblk)]
-    e_corr, rdm1 = mp2_get_corr(
+    e_corr, rdm1, _ = mp2_get_corr(
         mol, path, oslices, nvir, nocc, auxmol.nao, mo_energy, log=log, with_rdm1=with_rdm1, vslices=vslices)
     time1 = log.timer('mp2_get_corr', *time1)
     log.timer('mp2', *time0)

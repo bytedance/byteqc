@@ -36,7 +36,7 @@ from pyscf.lib import logger
 from pyscf.pbc.lib import kpts_helper
 
 from byteqc import lib
-from byteqc.cump2.dfmp2_2 import div_t2 as _div_t2_real
+from byteqc.cump2.dfmp2 import div_t2 as _div_t2_real
 from byteqc.cump2.krmp2_ovl import (
     build_krmp2_ovl as _build_krmp2_ovl_record,
     read_krmp2_ovl_kpair,

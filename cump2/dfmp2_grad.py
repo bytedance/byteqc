@@ -15,6 +15,8 @@
 
 import numpy
 import cupy
+import tempfile
+import os
 
 # TODO(BACKEND LIMITATION - MP2 GRADIENT):
 # The MP2 gradient backend is currently only validated with gpu4pyscf==1.3.4.
@@ -40,21 +42,22 @@ except ImportError:
 from byteqc import lib
 from byteqc.lib import Mg, MemoryTypeHost, gemm, contraction
 from pyscf import df
-from pyscf.lib import logger, prange
+from pyscf.lib import logger, prange, param
 from byteqc.cump2.dfmp2 import cderi_ovL_outcore, div_t2, mp2_get_occ_1rdm
 from multiprocessing import Pool
-from byteqc.cuobc.lib.int3c import VHFOpt3c, get_int3c
+from byteqc.cuobc.lib.int3c import VHFOpt3c, get_int2c, get_int3c
 from gpu4pyscf.grad.rhf import _jk_energy_per_atom
 from gpu4pyscf.df import int3c2e
 from functools import reduce
 from itertools import product
+# import ipdb
 
 
 get_de_int3c_nao_gs = 128
 get_de_int3c_naux_gs = 256
 
 
-def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True):
+def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_em=False):
     if verbose is None:
         verbose = mol.verbose
     log = logger.new_logger(rhf, verbose)
@@ -123,15 +126,22 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True):
     assert oblk > 0 and vblk > 0 and auxblk > 0, 'No enough GPU memory (%f.2GB) to perform MP2 '\
         'calculations' % (memory * 8 / (1024 ** 3))
 
+    path = tempfile.NamedTemporaryFile(dir=param.TMPDIR).name
+    os.mkdir(path)
     path, oslices = cderi_ovL_outcore(
-        mol, auxmol, coeff_o, coeff_v, oblk, vblk, log=log, save_j2c=True)
+        mol, auxmol, coeff_o, coeff_v, oblk, vblk, log=log, path=path, save_j2c=True)
+    file = lib.FileMp(path + '/eris.dat', 'r+')
+    del file['eri']
+    file.close()
     log.timer('cderi_ovL_outcore', *time0)
     lib.Mg.mapgpu(lambda: lib.free_all_blocks())
     mo_energy = cupy.asarray(rhf.mo_energy)
     vslices = [slice(i[0], i[1]) for i in prange(0, nvir, vblk)]
     auxslices = [slice(i[0], i[1]) for i in prange(0, naux, auxblk)]
-    e_corr, doo, dvv, gamma_2c = _grad_intermediates(
-        mol, path, vslices, oslices, auxslices, nvir, nocc, auxmol.nao, mo_energy, log=log)
+    e_corr, doo, dvv, gamma_2c, em = _grad_intermediates(
+        mol, path, vslices, oslices, auxslices, nvir, nocc, auxmol.nao, mo_energy, log=log, with_em=with_em)
+    log.info(f'MP2 total energy: {e_corr + rhf.e_tot}')
+    log.info(f'MP2 correlation energy: {e_corr}')
     lib.Mg.mapgpu(lambda: lib.free_all_blocks())
     de = get_de_int3c(mol,
                       auxmol,
@@ -142,8 +152,16 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True):
                       coeff_v,
                       log=log)
     lib.Mg.mapgpu(lambda: lib.free_all_blocks())
-    I_mat = get_I_mat(mol, auxmol, path, auxslices, coeff_o, coeff_v, log=log)
-
+    # I_mat = get_I_mat(mol, auxmol, path, auxslices, coeff_o, coeff_v, log=log)
+    path = cderi_outcore_tmp(mol, auxmol, rhf.mo_coeff, path, log=log)
+    file = lib.FileMp(path + '/eris.dat', 'r+')
+    del file['eri_tmp']
+    file.close()
+    I_mat = get_I_mat2(mol, auxmol, coeff_o, coeff_v, nocc, path, log=log)
+    file = lib.FileMp(path + '/eris.dat', 'r+')
+    del file['cderi_tmp']
+    del file['gamma_3c']
+    file.close()
     lib.Mg.mapgpu(lambda: lib.free_all_blocks())
     ao_ovlp = cupy.asarray(rhf.get_ovlp())
     aomo_coeff = cupy.asarray(rhf.mo_coeff)
@@ -202,9 +220,9 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True):
     int2c2e_ip1 = auxmol.intor('int2c2e_ip1')
 
     dm1_mix = hf_dm1 + dm1p
-    de += _jk_energy_per_atom(mol, dm1_mix)
-    de -= _jk_energy_per_atom(mol, dm1p)
-    de -= _jk_energy_per_atom(mol, hf_dm1)
+    de += cupy.asarray(_jk_energy_per_atom(mol, dm1_mix))
+    de -= cupy.asarray(_jk_energy_per_atom(mol, dm1p))
+    de -= cupy.asarray(_jk_energy_per_atom(mol, hf_dm1))
     dm1_mix = dm1p = hf_dm1 = None
     offsetdic = mol.offset_nr_by_atom()
     aux_offsetdic = auxmol.offset_nr_by_atom()
@@ -244,19 +262,19 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True):
         log.info('%4d %2s  %15.10f  %15.10f  %15.10f' %
                  (ia, mol.atom_symbol(ia), de[k, 0], de[k, 1], de[k, 2]))
 
-    if cleanfile:
-        file = lib.FileMp(path + '/eris.dat', 'r+')
-        del file['eri']
-        del file['cderi']
-        del file['j2c']
-        del file['gamma_3c']
-        file.close()
+    file = lib.FileMp(path + '/eris.dat', 'r+')
+    del file['cderi']
+    del file['j2c']
+    file.close()
 
-    return e_corr, e_corr + rhf.e_tot, de
+    if with_em:
+        return e_corr, e_corr + rhf.e_tot, de, em
+    else:
+        return e_corr, e_corr + rhf.e_tot, de
 
 
 def _grad_intermediates(mol, path, vslices, oslices, auxslices,
-                        nvir, nocc, naux, e_mo, log=None):
+                        nvir, nocc, naux, e_mo, log=None, with_em=False):
     if log is None:
         log = logger.new_logger(mol, mol.verbose)
     time0 = logger.process_clock(), logger.perf_counter()
@@ -411,6 +429,7 @@ def _grad_intermediates(mol, path, vslices, oslices, auxslices,
         gamma_3c = gamma_3c.reshape(naux, -1)
         lib.solve_triangular(j2c.T, gamma_3c, overwrite_b=True, lower=False)
         if waits[gid] is not None:
+            wait_loop(waits[gid])
             for w in waits[gid]:
                 w.wait()
         gamma_3c = gamma_3c.reshape(naux, -1, nvir)
@@ -459,10 +478,10 @@ def _grad_intermediates(mol, path, vslices, oslices, auxslices,
 
     lib.Mg.mapgpu(lambda: lib.free_all_blocks())
 
-    rdm1_occ = mp2_get_occ_1rdm(path, vslices, nvir,
-                                nocc, naux, e_mo, log)
+    rdm1_occ, em = mp2_get_occ_1rdm(path, vslices, nvir,
+                                nocc, naux, e_mo, log, with_em=with_em)
     time0 = log.timer("_grad_intermediates done!", *time0)
-    return e_corr, rdm1_occ, rdm1_vir, gamma_2c_h
+    return e_corr, rdm1_occ, rdm1_vir, gamma_2c_h, em
 
 
 def get_I_mat(mol, auxmol, path, auxslices,
@@ -571,8 +590,10 @@ def get_I_mat(mol, auxmol, path, auxslices,
             cupy.copyto(int3c_Lvp, tmp)
 
             if waits is not None:
-                for w in waits:
-                    w.wait()
+                wait_loop(waits.waits)
+                waits.wait()
+                # for w in waits:
+                #     w.wait()
                 waits = None
 
             g3c_d = lib.empty_from_buf(bufs[gid], g3c_h.shape, 'f8')
@@ -602,6 +623,102 @@ def get_I_mat(mol, auxmol, path, auxslices,
     time0 = log.timer("get_I_mat done!", *time0)
     return I_mat
 
+
+def get_I_mat2(mol, auxmol, coeff_o, coeff_v, nocc, path, log=None):
+    if log is None:
+        log = logger.new_logger(mol, mol.verbose)
+    time0 = logger.process_clock(), logger.perf_counter()
+    nocc = coeff_o.shape[1]
+    nvir = coeff_v.shape[1]
+    nao = mol.nao
+    naux = auxmol.nao
+
+    org_coeff_o = Mg.mapgpu(lambda: cupy.asarray(coeff_o))
+    org_coeff_v = Mg.mapgpu(lambda: cupy.asarray(coeff_v))
+    Mg.mapgpu(lambda: lib.free_all_blocks())
+
+    file = lib.FileMp(path + '/eris.dat', 'r')
+    int3c_f = file['cderi_tmp']
+    gamma_3c_f = file['gamma_3c']
+    file.close()
+    memory = lib.gpu_avail_bytes(0.7) / 8
+    memory -= nao ** 2 * 2 + max(nocc, nvir) * nao
+    gamma_auxblk = int(memory / (nao ** 2 + nvir * nocc))
+    assert gamma_auxblk > 0, 'No enough GPU memory (currently %f.2GB) to ' \
+        'perform MP2 calculations' % memory
+    gamma_auxblk = min(gamma_auxblk, get_de_int3c_naux_gs)
+    auxslices = [slice(i_tmp[0], i_tmp[1]) for i_tmp in prange(0, naux, gamma_auxblk)]
+    ngpu = Mg.ngpu
+    time0 = log.timer("get_I_mat prepare", *time0)
+
+    int3cs = Mg.mapgpu(lambda: cupy.empty((gamma_auxblk,
+                                           nao, nao), 'f8'))
+    g3cs = Mg.mapgpu(lambda: cupy.empty((gamma_auxblk,
+                                           nocc, nvir), 'f8'))
+    I_mat_d = Mg.mapgpu(lambda: cupy.zeros((nao, nao), 'f8'))
+    I_mat_tmp_d = Mg.mapgpu(lambda: cupy.empty((max(nocc, nvir), nao), 'f8'))
+
+    gamma_3c_h = [lib.empty((gamma_auxblk, nocc, nvir),
+                            'f8', type=MemoryTypeHost) for _ in range(ngpu)]
+    int3c_h = [lib.empty((gamma_auxblk, nao, nao),
+                            'f8', type=MemoryTypeHost) for _ in range(ngpu)]
+    I_mat_h = [lib.empty((nao, nao), 'f8', type=MemoryTypeHost)
+               for _ in range(ngpu)]
+
+    pools = [Pool(processes=lib.NumFileProcess) for _ in range(ngpu)]
+
+    def kernel(G_Q_index):
+        gid = Mg.getgid()
+        time1 = logger.process_clock(), logger.perf_counter()
+        sQ = auxslices[G_Q_index]
+
+        g3c_h = lib.empty_from_buf(gamma_3c_h[gid],
+                                   (sQ.stop - sQ.start, nocc, nvir), 'f8')
+        # gamma_3c_f.getitem(numpy.s_[sQ], pool=pools[gid], buf=g3c_h).wait()
+        wait_getitem = gamma_3c_f.getitem(numpy.s_[sQ], pool=pools[gid], buf=g3c_h)
+        wait_loop(wait_getitem.waits)
+        wait_getitem.wait()
+        wait_getitem = None
+
+        g3c_d = lib.empty_from_buf(g3cs[gid], g3c_h.shape, 'f8')
+        g3c_d.set(g3c_h)
+
+        i3c_h = lib.empty_from_buf(int3c_h[gid],
+                                   (sQ.stop - sQ.start, nao, nao), 'f8')
+        
+        # int3c_f.getitem(numpy.s_[sQ], pool=pools[gid], buf=i3c_h).wait()
+        wait_getitem = int3c_f.getitem(numpy.s_[sQ], pool=pools[gid], buf=i3c_h)
+        wait_loop(wait_getitem.waits)
+        wait_getitem.wait()
+        wait_getitem = None
+        
+        i3c_d = lib.empty_from_buf(int3cs[gid], i3c_h.shape, 'f8')
+        i3c_d.set(i3c_h)
+
+        tmp = contraction('Lia', g3c_d, 'Liv', i3c_d[:, :nocc],
+                            'av', buf=I_mat_tmp_d[gid])
+        contraction('av', tmp, 'ua', org_coeff_v[gid],
+                    'vu', I_mat_d[gid], beta=1.0)
+        tmp = contraction('Lia', g3c_d, 'Lav', i3c_d[:, nocc:],
+                            'iv', buf=I_mat_tmp_d[gid])
+        contraction('iv', tmp, 'ui', org_coeff_o[gid],
+                    'vu', I_mat_d[gid], beta=1.0)
+
+        I_mat_d[gid].get(out=I_mat_h[gid], blocking=True)
+        # cupy.cuda.Device().synchronize()
+        log.timer('get_I_mat naux:[%d:%d]/%d on GPU%s' %
+                  (sQ.start, sQ.stop, naux, Mg.gpus[gid]), *time1)
+
+    Mg.map(kernel, range(len(auxslices)))
+    for pool in pools:
+        pool.close()
+        pool.join()
+    
+    I_mat = cupy.asarray(I_mat_h).sum(axis=0)
+    I_mat_d = I_mat_tmp_d = I_mat_h = int3cs = g3cs = gamma_3c_h = int3c_h = None
+    coeff_o = coeff_v = org_coeff_o = org_coeff_v = None
+    time0 = log.timer("get_I_mat done!", *time0)
+    return I_mat
 
 def _response_dm1(mf, mo_coeff, Xvo, log=None):
     if log is None:
@@ -718,8 +835,10 @@ def get_de_int3c(mol, auxmol, path, auxslices,
         g3c_h = lib.empty_from_buf(
             gamma_3c_h[gid], (sQ.stop - sQ.start, nocc, nvir), 'f8')
         waits = gamma_3c_f.getitem(numpy.s_[sQ], pool=pools[gid], buf=g3c_h)
-        for w in waits:
-            w.wait()
+        wait_loop(waits.waits)
+        waits.wait()
+        waits = None
+
         g3c_d = lib.empty_from_buf(gamma_3c_d[gid], g3c_h.shape, 'f8')
         g3c_d.set(g3c_h)
 
@@ -822,9 +941,9 @@ def get_de_int3c(mol, auxmol, path, auxslices,
                                    (naux, so.stop - so.start, nvir), 'f8')
         waits = gamma_3c_f.getitem(numpy.s_[:, so],
                                    pool=pools[gid], buf=g3c_h)
-
-        for w in waits:
-            w.wait()
+        wait_loop(waits.waits)
+        waits.wait()
+        waits = None
 
         g3c_d = lib.empty_from_buf(gamma_3c_d[gid], g3c_h.shape, 'f8')
         g3c_d.set(g3c_h)
@@ -832,8 +951,6 @@ def get_de_int3c(mol, auxmol, path, auxslices,
                                 'Kia', buf=int3c_d[gid])
         G = contraction('Kia', inter_tmp, 'qa', coeff_v_sort[gid],
                         'Kiq', buf=gamma_3c_d[gid])
-
-        waits = None
 
         for i_ind in j_log_qs_fix_i.keys():
             si = islices[j_log_qs_fix_i[i_ind][0]]
@@ -881,3 +998,191 @@ def get_de_int3c(mol, auxmol, path, auxslices,
     time0 = log.timer("get_de_int3c done!", *time0)
 
     return de
+
+def cderi_outcore_tmp(mol, auxmol, mo_coeff, path, log=None):
+    '''Store the ERI in the desired format in disk.'''
+    if log is None:
+        log = logger.new_logger(mol, mol.verbose)
+    time0 = logger.process_clock(), logger.perf_counter()
+
+    norb = mo_coeff.shape[0]
+
+    naoblk = get_de_int3c_nao_gs
+    Mg.mapgpu(lambda: lib.free_all_blocks())
+    memory = lib.gpu_avail_bytes(0.7) / 8
+    nauxblk = int(memory / (naoblk ** 2 + norb ** 2 + naoblk * norb))
+    nauxblk = min(get_de_int3c_naux_gs, nauxblk)
+    ngpu = lib.Mg.ngpu
+    nauxblk = min(nauxblk, int(auxmol.nao / ngpu))
+    assert nauxblk > 0, 'No enough GPU memory (currently %f.2GB) to ' \
+        'perform MP2 calculations' % memory
+
+    vhfopt = VHFOpt3c(mol, auxmol, 'int2e')
+    vhfopt.build(group_size=naoblk, aux_group_size=nauxblk)
+    nauxid = len(vhfopt.aux_log_qs)
+
+    mo_coeff = vhfopt.coeff.dot(cupy.asarray(mo_coeff))
+    mo_coeff, ao_coeff = Mg.broadcast(mo_coeff, vhfopt.coeff)
+    Mg.mapgpu(lambda: lib.free_all_blocks())
+
+    kslices = []
+    kextents = []
+    for cp_aux_id in range(nauxid):
+        k0, k1 = vhfopt.auxmol.ao_loc[vhfopt.aux_l_ctr_offsets
+                                      [cp_aux_id: cp_aux_id + 2]]
+        kslices.append(slice(k0, k1))
+        kextents.append(k1 - k0)
+
+    nauxblk = max(kextents)
+    naux_cart, naux = vhfopt.auxcoeff.shape
+
+    oblk = int(memory / (naux * norb + naux_cart * norb))
+    assert oblk > 0, 'No enough GPU memory (currently %f.2GB) to ' \
+        'perform MP2 calculations' % memory
+    oblk = min(oblk, norb)
+    oblk = min(oblk, int(norb / ngpu))
+    oslices = [slice(*i) for i in prange(0, norb, oblk)]
+    if os.path.exists(os.path.join(path, 'eris.dat')):
+        file = lib.FileMp(path + '/eris.dat', 'r+')
+    else:
+        file = lib.FileMp(path + '/eris.dat', 'w')
+    eri = file.create_dataset(
+        'eri_tmp', (naux_cart, norb, norb), 'f8', blksizes=(kextents))
+    cderi = file.create_dataset('cderi_tmp', (naux, norb, norb), 'f8',
+                                blksizes=(naux, oblk, norb))
+    file.close()
+
+    int3cs = Mg.mapgpu(lambda: cupy.empty((nauxblk, naoblk, naoblk), 'f8'))
+    eris_d = Mg.mapgpu(lambda: cupy.empty((nauxblk, norb, norb), 'f8'))
+    bufs = Mg.mapgpu(lambda: cupy.empty((nauxblk, naoblk, norb, ), 'f8'))
+    ngpu = Mg.ngpu
+    eris_h = [lib.empty((nauxblk, norb, norb), 'f8', type=MemoryTypeHost)
+              for _ in range(ngpu)]
+    pools = [Pool(processes=lib.NumFileProcess) for _ in range(ngpu)]
+    waits = [None] * ngpu
+    time0 = log.timer("cderi_outcore_tmp prepare", *time0)
+
+    def eri_gen_OVL(cp_aux_id):
+        gid = Mg.getgid()
+        time1 = logger.process_clock(), logger.perf_counter()
+        eri_d = lib.empty_from_buf(eris_d[gid],
+                                   (kextents[cp_aux_id], norb, norb), 'f8')
+        eri_d[:] = 0
+        eri_h = lib.empty_from_buf(eris_h[gid], eri_d.shape, 'f8')
+
+        for cp_ij_id in range(len(vhfopt.log_qs)):
+            si, sj, sk, int3c = get_int3c(
+                cp_ij_id, cp_aux_id, vhfopt, buf=int3cs[gid])
+            leni, lenj, lenk = int3c.shape
+            tmp = contraction('ijL', int3c, 'ip', mo_coeff[gid][si],
+                                'Lpj', buf=bufs[gid])
+            # contraction('Lpj', tmp, 'jq', ao_coeff[gid][sj], 'Lpq',
+            #             eri_d, beta=1.0)
+            gemm(tmp.reshape((-1, lenj)), ao_coeff[gid][sj],
+                 eri_d.reshape((-1, norb)), beta=1.0)
+
+            if si != sj:
+                tmp = contraction('ijL', int3c, 'jp', mo_coeff[gid][sj],
+                                    'Lpi', buf=bufs[gid])
+                # contraction('Lpi', tmp, 'iq', ao_coeff[gid][si], 'Lpq',
+                #             eri_d, beta=1.0)
+                gemm(tmp.reshape((-1, leni)), ao_coeff[gid][si],
+                     eri_d.reshape((-1, norb)), beta=1.0)
+
+        tmp = None
+        if waits[gid]:
+            wait_loop(waits[gid])
+            for w in waits[gid]:
+                w.wait()
+
+        eri_d.get(out=eri_h, blocking=True)
+        waits[gid] = eri.setitem(numpy.s_[sk, :], eri_h, pool=pools[gid])
+        log.timer(
+            'cderi_outcore_tmp cp_aux_id:%d/%d on GPU%d' % (
+                cp_aux_id + 1, nauxid, Mg.gpus[gid]), *time1)
+
+    Mg.map(eri_gen_OVL, range(nauxid))
+    for wait in waits:
+        if wait:
+            for w in wait:
+                w.wait()
+    time0 = log.timer("cderi_outcore_tmp step1", *time0)
+
+    auxcoeff = cupy.asarray(vhfopt.auxcoeff.T, order='C')
+    auxcoeff = Mg.broadcast(auxcoeff)
+    for p in pools:
+        p.terminate()
+        p.join()
+    vhfopt = int3cs = eris_d = bufs = eris_h = pools = waits = None
+    Mg.mapgpu(lambda: lib.free_all_blocks())
+
+    cderis_d = Mg.mapgpu(lambda: cupy.empty((naux, oblk, norb), 'f8'))
+    eris_d = Mg.mapgpu(lambda: cupy.empty((naux_cart, oblk, norb), 'f8'))
+
+    cderis_h = [lib.empty((naux, oblk, norb), 'f8', type=MemoryTypeHost)
+                for _ in range(ngpu)]
+    eris_h = [lib.empty((naux_cart, oblk, norb), 'f8', type=MemoryTypeHost)
+              for _ in range(ngpu)]
+
+    waits = [None] * ngpu
+    pools_r = [Pool(processes=lib.NumFileProcess) for _ in range(ngpu)]
+    pools_w = [Pool(processes=lib.NumFileProcess) for _ in range(ngpu)]
+
+    def get_cderi(so):
+        gid = Mg.getgid()
+        time1 = logger.process_clock(), logger.perf_counter()
+
+        so_len = so.stop - so.start
+        eri_h = lib.empty_from_buf(
+            eris_h[gid], (naux_cart, so_len, norb), 'f8')
+        # eri.getitem(numpy.s_[:, so], pool=pools_r[gid],
+        #             buf=eri_h).wait()
+        waits_eri_get = eri.getitem(numpy.s_[:, so],
+                                    pool=pools_r[gid],
+                                    buf=eri_h)
+        wait_loop(waits_eri_get.waits)
+        waits_eri_get.wait()
+
+        eri_d = lib.empty_from_buf(eris_d[gid], eri_h.shape)
+        eri_d[:] = 0
+        eri_d.set(eri_h)
+        cderi_d = contraction('Lpq', eri_d, 'KL', auxcoeff[gid], 'Kpq',
+                              buf=cderis_d[gid])
+        if waits[gid]:
+            wait_loop(waits[gid])
+            for w in waits[gid]:
+                w.wait()
+        cderi_h = lib.empty_from_buf(cderis_h[gid], cderi_d.shape)
+        cderi_d.get(out=cderi_h, blocking=True)
+        waits[gid] = cderi.setitem(numpy.s_[:, so], cderi_h, pool=pools_w[gid])
+        log.timer('cderi_outcore_tmp nao:[%d:%d]/%d on GPU%s' %
+                  (so.start, so.stop, norb, Mg.gpus[gid]), *time1)
+
+    Mg.map(get_cderi, oslices)
+    for wait in waits:
+        if wait:
+            wait_loop(wait)
+            for w in wait:
+                w.wait()
+    for p in pools_r:
+        p.terminate()
+        p.join()
+    for p in pools_w:
+        p.terminate()
+        p.join()
+    cderis_d = eris_d = cderis_h = eris_h = waits = pools_r = pools_w = None
+    time0 = log.timer("cderi_outcore_tmp step2", *time0)
+    return path
+
+def wait_loop(waits):
+    tmp_a = cupy.random.randn(1000, 1000)
+    tmp_b = cupy.random.randn(1000, 1000)
+    tmp_c = cupy.zeros((1000, 1000)) 
+    while True:
+        break_flag = True
+        for w in waits:
+            break_flag = break_flag and w.ready()
+        if break_flag:
+            break
+        cupy.dot(tmp_a, tmp_b, out=tmp_c)
+    tmp_a = tmp_b = tmp_c = None
