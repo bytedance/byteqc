@@ -40,7 +40,7 @@ from pyscf import df
 from pyscf.lib import logger, prange, param
 from byteqc.cump2.dfmp2 import cderi_ovL_outcore, div_t2, mp2_get_occ_1rdm
 from multiprocessing import Pool
-from byteqc.cuobc.lib.int3c import VHFOpt3c, get_int2c, get_int3c
+from byteqc.cuobc.lib.int3c import VHFOpt3c, get_int3c
 from gpu4pyscf.grad.rhf import _jk_energy_per_atom
 from gpu4pyscf.df import int3c2e
 from functools import reduce
@@ -147,7 +147,6 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_em=False)
                       coeff_v,
                       log=log)
     lib.Mg.mapgpu(lambda: lib.free_all_blocks())
-    # I_mat = get_I_mat(mol, auxmol, path, auxslices, coeff_o, coeff_v, log=log)
     path = cderi_outcore_tmp(mol, auxmol, rhf.mo_coeff, path, log=log)
     file = lib.FileMp(path + '/eris.dat', 'r+')
     del file['eri_tmp']
@@ -483,148 +482,6 @@ def _grad_intermediates(mol, path, vslices, oslices, auxslices,
                                 nocc, naux, e_mo, log, with_em=with_em)
     time0 = log.timer("_grad_intermediates done!", *time0)
     return e_corr, rdm1_occ, rdm1_vir, gamma_2c_h, em
-
-
-def get_I_mat(mol, auxmol, path, auxslices,
-              coeff_o, coeff_v, log=None):
-    if log is None:
-        log = logger.new_logger(mol, mol.verbose)
-    time0 = logger.process_clock(), logger.perf_counter()
-    nocc = coeff_o.shape[1]
-    nvir = coeff_v.shape[1]
-    nao = mol.nao
-    gamma_auxblk = max(
-        auxslices[0].stop - auxslices[0].start,
-        int(numpy.diff(auxmol.ao_loc_nr()).max()))
-
-    vhfopt = VHFOpt3c(mol, auxmol, 'int2e')
-    vhfopt.build(group_size=get_de_int3c_nao_gs,
-                 aux_group_size=gamma_auxblk)
-    nauxid = len(vhfopt.aux_log_qs)
-    org_coeff_o = Mg.mapgpu(lambda: cupy.asarray(coeff_o))
-    org_coeff_v = Mg.mapgpu(lambda: cupy.asarray(coeff_v))
-    coeff_o = vhfopt.coeff.dot(cupy.asarray(coeff_o))
-    coeff_v = vhfopt.coeff.dot(cupy.asarray(coeff_v))
-    coeff_o = Mg.mapgpu(lambda: cupy.asarray(coeff_o))
-    coeff_v = Mg.mapgpu(lambda: cupy.asarray(coeff_v))
-    aocoeff = Mg.mapgpu(lambda: cupy.asarray(vhfopt.coeff))
-    auxcoeff = cupy.asarray(vhfopt.auxcoeff.T, order='C')
-    auxcoeff = Mg.mapgpu(lambda: cupy.asarray(auxcoeff))
-    Mg.mapgpu(lambda: lib.free_all_blocks())
-
-    kslices = []
-    kextents = []
-    for cp_aux_id in range(nauxid):
-        k0, k1 = vhfopt.auxmol.ao_loc[vhfopt.aux_l_ctr_offsets
-                                      [cp_aux_id: cp_aux_id + 2]]
-        kslices.append(slice(k0, k1))
-        kextents.append(k1 - k0)
-
-    nauxblk = max(kextents)
-
-    _, naux = vhfopt.auxcoeff.shape
-
-    file = lib.FileMp(path + '/eris.dat', 'r')
-    gamma_3c_f = file['gamma_3c']
-    file.close()
-    ngpu = Mg.ngpu
-    time0 = log.timer("get_I_mat prepare", *time0)
-
-    int3cs = Mg.mapgpu(lambda: cupy.empty((nauxblk,
-                                           get_de_int3c_nao_gs, get_de_int3c_nao_gs), 'f8'))
-    bufs = Mg.mapgpu(lambda: cupy.empty(
-        (gamma_auxblk, max(nocc, nvir), nao), 'f8'))
-    bufs_Lop = Mg.mapgpu(lambda: cupy.empty((gamma_auxblk, nocc, nao), 'f8'))
-    bufs_Lvp = Mg.mapgpu(lambda: cupy.empty((gamma_auxblk, nvir, nao), 'f8'))
-    I_mat_d = Mg.mapgpu(lambda: cupy.zeros((nao, nao), 'f8'))
-    I_mat_tmp_d = Mg.mapgpu(lambda: cupy.empty((max(nocc, nvir), nao), 'f8'))
-    I_mat_h = [lib.empty((nao, nao), 'f8', type=MemoryTypeHost)
-               for _ in range(ngpu)]
-    gamma_3c_h = [lib.empty((gamma_auxblk, nocc, nvir),
-                            'f8', type=MemoryTypeHost) for _ in range(ngpu)]
-    pools = [Pool(processes=lib.NumFileProcess) for _ in range(ngpu)]
-
-    def kernel(G_Q_index):
-        gid = Mg.getgid()
-        time1 = logger.process_clock(), logger.perf_counter()
-        sQ = auxslices[G_Q_index]
-
-        g3c_h = lib.empty_from_buf(gamma_3c_h[gid],
-                                   (sQ.stop - sQ.start, nocc, nvir), 'f8')
-        waits = gamma_3c_f.getitem(numpy.s_[sQ], pool=pools[gid], buf=g3c_h)
-
-        for cp_aux_id in range(len(vhfopt.aux_log_qs)):
-            sk2 = kslices[cp_aux_id]
-            if numpy.isclose(abs(auxcoeff[gid][sQ, sk2]).sum(), 0):
-                continue
-
-            int3c_Lop = lib.empty_from_buf(bufs_Lop[gid],
-                                           (kextents[cp_aux_id], nocc, nao), 'f8')
-            int3c_Lvp = lib.empty_from_buf(bufs_Lvp[gid],
-                                           (kextents[cp_aux_id], nvir, nao), 'f8')
-            int3c_Lop[:] = 0
-            int3c_Lvp[:] = 0
-            for cp_ij_id in range(len(vhfopt.log_qs)):
-                si, sj, sk, int3c = get_int3c(
-                    cp_ij_id, cp_aux_id, vhfopt, buf=int3cs[gid])
-                tmp = contraction('ijL', int3c, 'jp', aocoeff[gid][sj],
-                                  'ipL', buf=bufs[gid])
-                contraction('ipL', tmp, 'io', coeff_o[gid][si],
-                            'Lop', int3c_Lop, beta=1.0)
-                contraction('ipL', tmp, 'iv', coeff_v[gid][si],
-                            'Lvp', int3c_Lvp, beta=1.0)
-
-                if si != sj:
-                    tmp = contraction('ijL', int3c,
-                                      'ip', aocoeff[gid][si], 'jpL', buf=bufs[gid])
-                    contraction('jpL', tmp, 'jo', coeff_o[gid][sj],
-                                'Lop', int3c_Lop, beta=1.0)
-                    contraction('jpL', tmp, 'jv', coeff_v[gid][sj],
-                                'Lvp', int3c_Lvp, beta=1.0)
-
-            tmp = contraction('Lop', int3c_Lop, 'KL', auxcoeff[gid][sQ, sk],
-                              'Kop', buf=bufs[gid])
-            int3c_Lop = lib.empty_from_buf(bufs_Lop[gid], tmp.shape, 'f8')
-            cupy.copyto(int3c_Lop, tmp)
-
-            tmp = contraction('Lvp', int3c_Lvp, 'KL', auxcoeff[gid][sQ, sk],
-                              'Kvp', buf=bufs[gid])
-            int3c_Lvp = lib.empty_from_buf(bufs_Lvp[gid], tmp.shape, 'f8')
-            cupy.copyto(int3c_Lvp, tmp)
-
-            if waits is not None:
-                wait_loop(waits.waits)
-                waits.wait()
-                # for w in waits:
-                #     w.wait()
-                waits = None
-
-            g3c_d = lib.empty_from_buf(bufs[gid], g3c_h.shape, 'f8')
-            g3c_d.set(g3c_h)
-
-            tmp = contraction('Lia', g3c_d, 'Liv', int3c_Lop,
-                              'av', buf=I_mat_tmp_d[gid])
-            contraction('av', tmp, 'ua', org_coeff_v[gid],
-                        'vu', I_mat_d[gid], beta=1.0)
-            tmp = contraction('Lia', g3c_d, 'Lav', int3c_Lvp,
-                              'iv', buf=I_mat_tmp_d[gid])
-            contraction('iv', tmp, 'ui', org_coeff_o[gid],
-                        'vu', I_mat_d[gid], beta=1.0)
-
-        I_mat_d[gid].get(out=I_mat_h[gid], blocking=True)
-        log.timer('get_I_mat nao:[%d:%d]/%d on GPU%s' %
-                  (sQ.start, sQ.stop, naux, Mg.gpus[gid]), *time1)
-
-    Mg.map(kernel, range(len(auxslices)))
-    for pool in pools:
-        pool.close()
-        pool.join()
-
-    I_mat = cupy.asarray(I_mat_h).sum(axis=0)
-    I_mat_d = I_mat_tmp_d = int3cs = bufs = bufs_Lop = bufs_Lvp = I_mat_h = None
-    auxcoeff = coeff_o = coeff_v = org_coeff_o = org_coeff_v = None
-    time0 = log.timer("get_I_mat done!", *time0)
-    return I_mat
 
 
 def get_I_mat2(mol, auxmol, coeff_o, coeff_v, nocc, path, log=None):
