@@ -31,12 +31,7 @@ except ImportError:
           "Please install gpu4pyscf by using the command\n",
           "------------------------- \n",
           "pip install --no-deps \n",
-          "   gpu4pyscf-cuda12x==1.3.1 \n",
-          "   pyscf==2.8.0 \n",
-          "   pyscf-dispersion==1.3.0 \n",
-          "   geometric==1.1 \n",
-          "   gpu4pyscf-libxc-cuda12x==0.6 \n",
-          "   networkx==3.4.2 \n",
+          "   gpu4pyscf-cuda12x==1.7.0 \n",
           "------------------------- \n",)
     raise ImportError
 from byteqc import lib
@@ -206,9 +201,11 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_em=False)
     gpu_grad_rhf = grad_rhf.to_gpu()
     dm1 = reduce(cupy.dot, (aomo_coeff, dm1mo, aomo_coeff.T))
     p1_tmp = cupy.dot(cupy.asarray(coeff_o), cupy.asarray(coeff_o.T))
-    vhf_s1occ = reduce(cupy.dot, (p1_tmp,
-                                  gpu_rhf.get_veff(mol, dm1 + dm1.T),
-                                  p1_tmp))
+    vj, vk = gpuscf.jk.get_jk(mol, dm1 + dm1.T)
+    vhf_response = vj - 0.5 * vk
+    vj = vk = None
+    vhf_s1occ = reduce(cupy.dot, (p1_tmp, vhf_response, p1_tmp))
+    vhf_response = None
     dm1mo = p1_tmp = None
     hf_dm1 = cupy.asarray(rhf.make_rdm1())
     dm1p = hf_dm1 + dm1 * 2
@@ -220,9 +217,19 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_em=False)
     int2c2e_ip1 = auxmol.intor('int2c2e_ip1')
 
     dm1_mix = hf_dm1 + dm1p
-    de += cupy.asarray(_jk_energy_per_atom(mol, dm1_mix))
-    de -= cupy.asarray(_jk_energy_per_atom(mol, dm1p))
-    de -= cupy.asarray(_jk_energy_per_atom(mol, hf_dm1))
+    direct_scf_tol = getattr(gpu_rhf, 'direct_scf_tol',
+                             getattr(rhf, 'direct_scf_tol', 1e-13))
+    jk_vhfopt = gpuscf.jk._VHFOpt(
+        mol, direct_scf_tol=direct_scf_tol, tile=1).build()
+    # _jk_energy_per_atom is quadratic in the density.  The MP2 gradient needs
+    # the bilinear cross term between the HF density and dm1p:
+    # B(H, P) = [F(H + P) - F(H) - F(P)] / 2.
+    jk_cross = cupy.asarray(_jk_energy_per_atom(jk_vhfopt, dm1_mix))
+    jk_cross -= cupy.asarray(_jk_energy_per_atom(jk_vhfopt, dm1p))
+    jk_cross -= cupy.asarray(_jk_energy_per_atom(jk_vhfopt, hf_dm1))
+    jk_cross *= 0.5
+    de += jk_cross
+    jk_vhfopt = jk_cross = None
     dm1_mix = dm1p = hf_dm1 = None
     offsetdic = mol.offset_nr_by_atom()
     aux_offsetdic = auxmol.offset_nr_by_atom()
@@ -232,21 +239,26 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_em=False)
         _, _, ap0, ap1 = aux_offsetdic[ia]
         asa = slice(ap0, ap1)
 
-        de[k] += cupy.einsum('xij,ij->x', s1[:, sa], im1[sa])
-        de[k] += cupy.einsum('xji,ij->x', s1[:, sa], im1[:, sa])
+        term = cupy.einsum('xij,ij->x', s1[:, sa], im1[sa])
+        term += cupy.einsum('xji,ij->x', s1[:, sa], im1[:, sa])
+        de[k] += term
 
         h1ao = cupy.asarray(hcore_deriv(ia))
-        de[k] += cupy.einsum('xij,ji->x', h1ao, dm1)
+        term = cupy.einsum('xij,ji->x', h1ao, dm1)
+        de[k] += term
 
-        de[k] -= cupy.einsum('xij,ij->x', s1[:, sa], zeta[sa])
-        de[k] -= cupy.einsum('xji,ij->x', s1[:, sa], zeta[:, sa])
+        term = -cupy.einsum('xij,ij->x', s1[:, sa], zeta[sa])
+        term -= cupy.einsum('xji,ij->x', s1[:, sa], zeta[:, sa])
+        de[k] += term
 
-        de[k] -= cupy.einsum('xij,ij->x', s1[:, sa], vhf_s1occ[sa]) * 2
+        term = -cupy.einsum('xij,ij->x', s1[:, sa], vhf_s1occ[sa]) * 2
+        de[k] += term
 
-        de[k] += cupy.einsum('RS, xRS -> x',
-                             gamma_2c[asa], int2c2e_ip1[:, asa])
-        de[k] += cupy.einsum('SR, xRS -> x',
-                             gamma_2c[:, asa], int2c2e_ip1[:, asa])
+        term = cupy.einsum('RS, xRS -> x',
+                           gamma_2c[asa], int2c2e_ip1[:, asa])
+        term += cupy.einsum('SR, xRS -> x',
+                            gamma_2c[:, asa], int2c2e_ip1[:, asa])
+        de[k] += term
     s1 = im1 = h1ao = hcore_deriv = zeta = None
     vhf_s1occ = gamma_2c = int2c2e_ip1 = dm1 = None
     lib.Mg.mapgpu(lambda: lib.free_all_blocks())
@@ -492,7 +504,9 @@ def get_I_mat(mol, auxmol, path, auxslices,
     nocc = coeff_o.shape[1]
     nvir = coeff_v.shape[1]
     nao = mol.nao
-    gamma_auxblk = auxslices[0].stop - auxslices[0].start
+    gamma_auxblk = max(
+        auxslices[0].stop - auxslices[0].start,
+        int(numpy.diff(auxmol.ao_loc_nr()).max()))
 
     vhfopt = VHFOpt3c(mol, auxmol, 'int2e')
     vhfopt.build(group_size=get_de_int3c_nao_gs,
