@@ -35,6 +35,8 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_rdm1=Fals
     coeff_o = rhf.mo_coeff[:, :nocc]
     coeff_v = rhf.mo_coeff[:, nocc:]
     nvir = coeff_v.shape[1]
+    
+    with_rdm1 = with_rdm1 or with_em
 
     if auxbasis is None:
         auxbasis = df.make_auxbasis(mol, mp2fit=True)
@@ -448,7 +450,9 @@ def mp2_get_corr(mol, path, oslices, nvir, nocc, naux, e_mo, log=None, with_rdm1
 
     e_corr_list = Mg.map(MP2_kernel, range(len(oslices)))
     ias_d = jbs_d = t2s = ias_h = jbs_h = pools = tau_d = e_mos = None
-
+    
+    lib.Mg.mapgpu(lambda: lib.free_all_blocks())
+    
     e_corr = numpy.sum(e_corr_list).item()
 
     if with_rdm1 or with_em:
@@ -606,4 +610,5 @@ def wait_loop(waits):
         if break_flag:
             break
         cupy.dot(tmp_a, tmp_b, out=tmp_c)
+        cupy.cuda.get_current_stream().synchronize()
     tmp_a = tmp_b = tmp_c = None

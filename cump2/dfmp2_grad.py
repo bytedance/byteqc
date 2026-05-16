@@ -1185,4 +1185,5 @@ def wait_loop(waits):
         if break_flag:
             break
         cupy.dot(tmp_a, tmp_b, out=tmp_c)
+        cupy.cuda.get_current_stream().synchronize()
     tmp_a = tmp_b = tmp_c = None
