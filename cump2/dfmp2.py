@@ -16,6 +16,7 @@
 import tempfile
 import numpy
 import cupy
+import shutil
 from byteqc import lib
 from byteqc.lib import Mg, MemoryTypeHost, gemm, contraction
 from pyscf import df
@@ -95,10 +96,7 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_rdm1=Fals
         log.info(f'MP2 rdm1 is obtained.')
 
     if cleanfile:
-        file = lib.FileMp(path + '/eris.dat', 'r+')
-        del file['eri']
-        del file['cderi']
-        file.close()
+        shutil.rmtree(path, ignore_errors=True)
 
     if with_rdm1 and with_em:
         return e_corr, e_corr + rhf.e_tot, rdm1, em

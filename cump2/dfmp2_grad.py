@@ -17,6 +17,7 @@ import numpy
 import cupy
 import tempfile
 import os
+import shutil
 
 # TODO(BACKEND LIMITATION - MP2 GRADIENT):
 # The MP2 gradient backend is currently only validated with gpu4pyscf==1.3.4.
@@ -273,10 +274,8 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_em=False)
         log.info('%4d %2s  %15.10f  %15.10f  %15.10f' %
                  (ia, mol.atom_symbol(ia), de[k, 0], de[k, 1], de[k, 2]))
 
-    file = lib.FileMp(path + '/eris.dat', 'r+')
-    del file['cderi']
-    del file['j2c']
-    file.close()
+    if cleanfile:
+        shutil.rmtree(path, ignore_errors=True)
 
     if with_em:
         return e_corr, e_corr + rhf.e_tot, de, em
