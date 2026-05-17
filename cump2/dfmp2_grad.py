@@ -370,7 +370,8 @@ def _grad_intermediates(mol, path, vslices, oslices, auxslices,
         tau -= t2.transpose(0, 3, 2, 1)
         div_t2(tau, e_mo_o[so], e_mo_v, e_mo_o[so], e_mo_v)
 
-        e_corr = contraction('iajb', t2, 'iajb', tau, '')
+        e_tmp = contraction('iajb', t2, 'iajb', tau, 'i')
+        e_corr = e_tmp.sum()
 
         div_t2(t2, e_mo_o[so], e_mo_v, e_mo_o[so], e_mo_v)
         contraction('iajc', t2, 'ibjc', tau, 'ab', rdm1_vir_d[gid],
@@ -415,8 +416,9 @@ def _grad_intermediates(mol, path, vslices, oslices, auxslices,
                         gamma_3c, beta=1.0, alpha=2.0)
 
             if o_ind2 > o_ind:
-                contraction('iajb', t2, 'iajb', tau, '',
-                            e_corr, beta=1.0, alpha=2.0)
+                contraction('iajb', t2, 'iajb', tau, 'i',
+                            e_tmp, alpha=2.0)
+                e_corr += e_tmp.sum()
                 div_t2(t2, e_mo_o[so], e_mo_v, e_mo_o[so2], e_mo_v)
                 contraction('iajc', t2, 'ibjc', tau, 'ab', rdm1_vir_d[gid],
                             alpha=2.0, beta=1.0)
