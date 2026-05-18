@@ -36,8 +36,6 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_rdm1=Fals
     coeff_o = rhf.mo_coeff[:, :nocc]
     coeff_v = rhf.mo_coeff[:, nocc:]
     nvir = coeff_v.shape[1]
-    
-    with_rdm1 = with_rdm1 or with_em
 
     if auxbasis is None:
         auxbasis = df.make_auxbasis(mol, mp2fit=True)
@@ -53,12 +51,14 @@ def kernel(mol, rhf, auxbasis=None, verbose=None, cleanfile=True, with_rdm1=Fals
         (-1 * b + numpy.sqrt((b ** 2 - 4 * a * c))) / (2 * a),
         nocc / ngpu))
 
+    need_vir_slice = with_rdm1 or with_em
     if with_rdm1:
         oblk_rdm = int(min(
             (-1 * (b / 2) + numpy.sqrt(((b / 2) ** 2 - 2 * 4 * a * c))) / (2 * 2 * a),
             nocc / ngpu))
         oblk = min(oblk, oblk_rdm)
 
+    if need_vir_slice:
         a = nocc ** 2
         b = auxmol.nao * nocc * 2
         c = -1 * memory
@@ -334,9 +334,16 @@ def mp2_get_corr(mol, path, oslices, nvir, nocc, naux, e_mo, log=None, with_rdm1
 
     oblk = oslices[0].stop - oslices[0].start
 
-    if with_rdm1:
-        assert vslices, 'with_rdm1 and vslices must be provided together! ' \
-            'with_rdm1 : %s, vslices : %s' % (with_rdm1, vslices)
+    if with_rdm1 or with_em:
+        assert vslices, 'with_rdm1/with_em and vslices must be provided together! ' \
+            'with_rdm1 : %s, with_em : %s, vslices : %s' % (with_rdm1, with_em, vslices)
+
+    if with_em and not with_rdm1:
+        _, em = mp2_get_occ_1rdm(
+            path, vslices, nvir, nocc, naux, e_mo, log,
+            with_em=True, with_rdm1=False)
+        lib.Mg.mapgpu(lambda: lib.free_all_blocks())
+        return numpy.trace(em).item(), None, em
 
     file = lib.FileMp(path + '/eris.dat', 'r')
     cderi = file['cderi']
@@ -346,6 +353,8 @@ def mp2_get_corr(mol, path, oslices, nvir, nocc, naux, e_mo, log=None, with_rdm1
 
     ias_d = Mg.mapgpu(lambda: cupy.empty((oblk, nvir, naux), 'f8'))
     jbs_d = Mg.mapgpu(lambda: cupy.empty((oblk, nvir, naux), 'f8'))
+
+    compute_corr = not with_em
 
     if with_rdm1:
         tau_d = Mg.mapgpu(lambda: cupy.empty((oblk ** 2 * nvir ** 2), 'f8'))
@@ -385,11 +394,13 @@ def mp2_get_corr(mol, path, oslices, nvir, nocc, naux, e_mo, log=None, with_rdm1
                   transb='T', buf=t2s[gid]).reshape(
             (so_len, nvir, so_len, nvir))
         div_t2(t2, e_mo_o[so], e_mo_v, e_mo_o[so], e_mo_v)
-        tmp = contraction('iajb', t2, 'iaL', ia_d, 'jbL', buf=jbs_d[gid],
-                          alpha=2.0)
-        contraction('iajb', t2, 'ibL', ia_d, 'jaL', tmp, beta=1.0,
-                    alpha=-1.0)
-        e_corr = tmp.ravel().dot(ia_d.ravel()).item()
+        e_corr = 0.0
+        if compute_corr:
+            tmp = contraction('iajb', t2, 'iaL', ia_d, 'jbL', buf=jbs_d[gid],
+                              alpha=2.0)
+            contraction('iajb', t2, 'ibL', ia_d, 'jaL', tmp, beta=1.0,
+                        alpha=-1.0)
+            e_corr = tmp.ravel().dot(ia_d.ravel()).item()
 
         if with_rdm1:
             tau = lib.empty_from_buf(tau_d[gid], t2.shape, 'f8')
@@ -417,16 +428,17 @@ def mp2_get_corr(mol, path, oslices, nvir, nocc, naux, e_mo, log=None, with_rdm1
                       transb='T', buf=t2s[gid]).reshape(
                 (so_len, nvir, so_len2, nvir))
             div_t2(t2, e_mo_o[so], e_mo_v, e_mo_o[so2], e_mo_v)
-            tmp = contraction('iajb', t2, 'jbL', jb_d, 'iaL', buf=ias_d[gid],
-                              alpha=2.0)
-            contraction('iajb', t2, 'jaL', jb_d, 'ibL', tmp, beta=1.0,
-                        alpha=-1.0)
+            if compute_corr:
+                tmp = contraction('iajb', t2, 'jbL', jb_d, 'iaL', buf=ias_d[gid],
+                                  alpha=2.0)
+                contraction('iajb', t2, 'jaL', jb_d, 'ibL', tmp, beta=1.0,
+                            alpha=-1.0)
 
-            ia_d2 = lib.empty_from_buf(jbs_d[gid], ia_h.shape, 'f8')
-            ia_d2.set(ia_h)
-            e_corr += tmp.ravel().dot(ia_d2.ravel()).item() * 2
+                ia_d2 = lib.empty_from_buf(jbs_d[gid], ia_h.shape, 'f8')
+                ia_d2.set(ia_h)
+                e_corr += tmp.ravel().dot(ia_d2.ravel()).item() * 2
 
-            cupy.copyto(ia_d, ia_d2)
+                cupy.copyto(ia_d, ia_d2)
 
             if with_rdm1:
                 tau = lib.empty_from_buf(tau_d[gid], t2.shape, 'f8')
@@ -447,27 +459,32 @@ def mp2_get_corr(mol, path, oslices, nvir, nocc, naux, e_mo, log=None, with_rdm1
         return e_corr
 
     e_corr_list = Mg.map(MP2_kernel, range(len(oslices)))
+    for p in pools:
+        p.terminate()
+        p.join()
     ias_d = jbs_d = t2s = ias_h = jbs_h = pools = tau_d = e_mos = None
     
     lib.Mg.mapgpu(lambda: lib.free_all_blocks())
     
     e_corr = numpy.sum(e_corr_list).item()
 
-    if with_rdm1 or with_em:
+    if with_rdm1:
         rdm1_vir_list = Mg.map(cupy.asnumpy, rdm1_vir_d)
         rdm1_vir = numpy.sum(rdm1_vir_list, axis=0)
-        rdm1_vir_list = None
+        rdm1_vir_d = rdm1_vir_list = None
+        lib.Mg.mapgpu(lambda: lib.free_all_blocks())
 
-        rdm1_occ, em = mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log, with_em)
+        rdm1_occ, em = mp2_get_occ_1rdm(
+            path, vslices, nvir, nocc, naux, e_mo, log,
+            with_em=with_em, with_rdm1=True)
+        if with_em:
+            e_corr = numpy.trace(em).item()
 
-        if with_rdm1:
-            nao = nocc + nvir
-            rdm1 = lib.empty((nao, nao), 'f8', type=MemoryTypeHost)
-            rdm1[:] = 0
-            rdm1[:nocc, :nocc] = rdm1_occ + numpy.eye(nocc) * 2
-            rdm1[nocc:, nocc:] = rdm1_vir
-        else:
-            rdm1 = None
+        nao = nocc + nvir
+        rdm1 = lib.empty((nao, nao), 'f8', type=MemoryTypeHost)
+        rdm1[:] = 0
+        rdm1[:nocc, :nocc] = rdm1_occ + numpy.eye(nocc) * 2
+        rdm1[nocc:, nocc:] = rdm1_vir
     else:
         rdm1 = None
         em = None
@@ -475,7 +492,8 @@ def mp2_get_corr(mol, path, oslices, nvir, nocc, naux, e_mo, log=None, with_rdm1
     return e_corr, rdm1, em
 
 
-def mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log, with_em=False):
+def mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log,
+                     with_em=False, with_rdm1=True):
 
     time0 = logger.process_clock(), logger.perf_counter()
     vblk = vslices[0].stop - vslices[0].start
@@ -493,7 +511,8 @@ def mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log, with_em=False):
     jbs_d = Mg.mapgpu(lambda: cupy.empty((nocc, vblk, naux), 'f8'))
 
     tau_d = Mg.mapgpu(lambda: cupy.empty((vblk ** 2 * nocc ** 2), 'f8'))
-    rdm1_occ_d = Mg.mapgpu(lambda: cupy.zeros((nocc, nocc), 'f8'))
+    if with_rdm1:
+        rdm1_occ_d = Mg.mapgpu(lambda: cupy.zeros((nocc, nocc), 'f8'))
 
     t2s = Mg.mapgpu(lambda: cupy.empty((nocc ** 2, vblk ** 2), 'f8'))
     ngpu = Mg.ngpu
@@ -533,15 +552,17 @@ def mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log, with_em=False):
             tau -= t2.transpose(2, 1, 0, 3)
             div_t2(t2, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv])
             contraction('iakb', tau, 'jakb', t2, 'ij', em_d[gid], beta=1.0)
-            div_t2(tau, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv])
+            if with_rdm1:
+                div_t2(tau, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv])
 
         else:
             div_t2(t2, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv])
             cupy.copyto(tau, t2)
             tau *= 2
             tau -= t2.transpose(2, 1, 0, 3)
-        contraction('iakb', t2, 'jakb', tau, 'ij', rdm1_occ_d[gid],
-                    alpha=-2.0, beta=1.0)
+        if with_rdm1:
+            contraction('iakb', t2, 'jakb', tau, 'ij', rdm1_occ_d[gid],
+                        alpha=-2.0, beta=1.0)
 
         vslices2 = vslices[v_ind + 1:]
         for v_ind2, sv2 in enumerate(vslices2):
@@ -567,7 +588,8 @@ def mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log, with_em=False):
                 div_t2(t2, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv2])
                 contraction('iakb', tau, 'jakb', t2, 'ij', em_d[gid], beta=1.0)
                 contraction('kaib', tau, 'kajb', t2, 'ij', em_d[gid], beta=1.0)
-                div_t2(tau, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv2])
+                if with_rdm1:
+                    div_t2(tau, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv2])
 
             else:
                 div_t2(t2, e_mo_o, e_mo_v[sv], e_mo_o, e_mo_v[sv2])
@@ -576,23 +598,33 @@ def mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log, with_em=False):
                 tau *= 2
                 tau -= t2.transpose(2, 1, 0, 3)
 
-            contraction('iakb', t2, 'jakb', tau, 'ij', rdm1_occ_d[gid],
-                        alpha=-2.0, beta=1.0)
-            contraction('kaib', t2, 'kajb', tau, 'ij', rdm1_occ_d[gid],
-                        alpha=-2.0, beta=1.0)
+            if with_rdm1:
+                contraction('iakb', t2, 'jakb', tau, 'ij', rdm1_occ_d[gid],
+                            alpha=-2.0, beta=1.0)
+                contraction('kaib', t2, 'kajb', tau, 'ij', rdm1_occ_d[gid],
+                            alpha=-2.0, beta=1.0)
 
         log.timer('mp2_get_occ_1rdm nao:[%d:%d]/%d on GPU%s' %
                   (sv.start, sv.stop, nvir, Mg.gpus[gid]), *time0)
 
     Mg.map(MP2_occ_1rdm_kernel, range(len(vslices)))
-    rdm1_occ_list = Mg.map(cupy.asnumpy, rdm1_occ_d)
-    rdm1_occ = numpy.sum(rdm1_occ_list, axis=0)
+    for p in pools:
+        p.terminate()
+        p.join()
+    if with_rdm1:
+        rdm1_occ_list = Mg.map(cupy.asnumpy, rdm1_occ_d)
+        rdm1_occ = numpy.sum(rdm1_occ_list, axis=0)
+    else:
+        rdm1_occ = None
+        rdm1_occ_list = None
     if with_em:
         em_list = Mg.map(cupy.asnumpy, em_d)
         em = numpy.sum(em_list, axis=0)
     else:
         em = None
-    ias_d = jbs_d = t2s = ias_h = jbs_h = pools = tau_d = e_mos = rdm1_occ_list = None
+    ias_d = jbs_d = t2s = ias_h = jbs_h = pools = tau_d = e_mos = None
+    rdm1_occ_d = rdm1_occ_list = em_d = em_list = None
+    lib.Mg.mapgpu(lambda: lib.free_all_blocks())
 
     return rdm1_occ, em
 
