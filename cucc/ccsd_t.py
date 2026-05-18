@@ -417,13 +417,13 @@ def kernel(mycc, eris, t1=None, t2=None, projector=None, with_em=False):
             if with_em:
                 lib.contraction('nijp', wr6, 'nijq', vr6, 'pq', et, beta=1.0)
             else:
-                lib.contraction('nijk', wr6, 'nijk', vr6, '', et, beta=1.0)
+                et += wr6.ravel().dot(vr6.ravel())
         else:
             r3(wr6, vr6)
             wr6_tmp = tmpbuf.empty(wr6.shape, 'f8')
             lib.contraction('nijp', vr6, 'pk', projector[igpu], 'nijk', wr6_tmp)
             div_d3(nocc, *abc, e_occ[igpu], e_vir[igpu], wr6_tmp)
-            lib.contraction('nijk', wr6_tmp, 'nijk', wr6, '', et, beta=1.0)
+            et += wr6_tmp.ravel().dot(wr6.ravel())
             wr6[:] = wr6_tmp
 
     def add_v_e(abc, wr6, mode, x, y, tmpbuf):
@@ -478,7 +478,7 @@ def kernel(mycc, eris, t1=None, t2=None, projector=None, with_em=False):
         if with_em:
             lib.contraction('bnp', x, 'bnq', y, 'pq', et, beta=1.0)
         else:
-            lib.contraction('bnk', x, 'bnk', y, '', et, beta=1.0)
+            et += x.ravel().dot(y.ravel())
 
         time1 = log.timer_debug1(
             'ccsdt GPU%d [%d:%d]/%d' % (Mg.gpus[igpu], p0, p1, nabc), *time1)

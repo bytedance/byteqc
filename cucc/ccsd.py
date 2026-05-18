@@ -562,11 +562,12 @@ class CCSD(cc.ccsd.CCSD):
             with t2[p0:p1] as t2arr:
                 ker(nocc, nvir, p0, eris_ovov, mo_e, t2arr)
                 emp2 += culib.contraction(
-                    'ijab', t2arr, 'iajb', eris_ovov, '', alpha=2.0).item()
+                    'ijab', t2arr, 'iajb', eris_ovov, 'i',
+                    alpha=2.0).sum().item()
                 eris_ovov = eris.ovov.getitem(numpy.s_[:, :, p0:p1],
                                               buf=eris_ovov)
                 emp2 -= culib.contraction(
-                    'jiab', t2arr, 'iajb', eris_ovov, '', alpha=1.0).item()
+                    'jiab', t2arr, 'iajb', eris_ovov, 'j').sum().item()
             t2arr = None
         eris_ovov = mo_e = None
         self.emp2 = emp2.real
@@ -590,7 +591,7 @@ class CCSD(cc.ccsd.CCSD):
 
         nocc, nvir = t1.shape
         fock = cupy.asarray(eris.fock[:nocc, nocc:])
-        e = culib.contraction('ia', fock, 'ia', t1, '').item() * 2
+        e = fock.ravel().dot(t1.ravel()).item() * 2
         fock = None
         if with_em:
             em = cupy.zeros((nocc, nocc))
@@ -613,14 +614,16 @@ class CCSD(cc.ccsd.CCSD):
                 culib.contraction(
                     'ipab', tau, 'iaqb', eris_ovov, 'pq', em, alpha=2.0, beta=1.0)
             else:
-                e += culib.contraction('ijab', tau, 'iajb',
-                                    eris_ovov, '', alpha=2.0).item()
+                e += culib.contraction(
+                    'ijab', tau, 'iajb', eris_ovov, 'i',
+                    alpha=2.0).sum().item()
             eris_ovov = eris.ovov.getitem(
                 numpy.s_[:, :, p0:p1], buf=eris_ovov)
             if with_em:
                 culib.contraction('qajb', eris_ovov, 'jpab', tau, 'pq', em, alpha=-1.0, beta=1.0)
             else:
-                e -= culib.contraction('iajb', eris_ovov, 'jiab', tau, '').item()
+                e -= culib.contraction(
+                    'iajb', eris_ovov, 'jiab', tau, 'j').sum().item()
         buf = buf1 = buf2 = eris_ovov = tau = None
         lib.free_all_blocks()
         if with_em:
