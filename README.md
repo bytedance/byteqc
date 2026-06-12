@@ -3,7 +3,7 @@
 ByteQC is a high-performance, GPU-accelerated quantum chemistry package designed for large-scale quantum chemistry simulations. It currently supports a range of methods, including mean-field calculations for both open and periodic boundary conditions, MP2 simulations, CCSD, and CCSD(T) calculations. All of these methods are optimized to support multiple GPUs, enabling efficient parallelization.
 Additionally, ByteQC includes an integrated functionality for systematically improvable embedding (SIE), which allows for scalable simulations of complex systems. The package also exports several useful tools for the development of GPU-based quantum chemistry applications.
 
-## Exteranl dependencies
+## External dependencies
 
 This package incorporates parts of its code adapted from several external open-source projects:
 
@@ -29,12 +29,12 @@ GPU requirement: test on NVIDIA V100, A100, H100, and 4070Ti.
 - scipy
 - pyscf =2.5.0
 
-Build dependencied:
+Build dependencies:
 
 - libcutensor >=2.1.0.9 (installation from conda is also supported)
 - libcublas
 
-Build the package by run command `python byteqc/setup.py`.
+Build the package by running the command `python byteqc/setup.py`.
 
 ## Package structure
 
