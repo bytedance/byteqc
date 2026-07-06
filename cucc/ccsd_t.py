@@ -244,7 +244,7 @@ take0101 = cupy.ElementwiseKernel(
     ''', 'take0101')
 
 
-def kernel(mycc, eris, t1=None, t2=None, projector=None, with_em=False):
+def kernel(mycc, eris, t1=None, t2=None, projector=None):
     time0 = logger.process_clock(), logger.perf_counter()
     log = logger.Logger(mycc.stdout, mycc.verbose)
     if t1 is None:
@@ -293,7 +293,6 @@ def kernel(mycc, eris, t1=None, t2=None, projector=None, with_em=False):
             take011(nocc * nocc, nvir, nvir, ind1, ind2, t2[igpu], out)
     else:
         # t2 can't store in GPU
-        log.info('t2 in CPU memory. ccsd_t runs in slow mode!')
         def take010_t2(out, ind, t2, buf, isTrans=False):
             blk = min(nocc * nocc, int(buf.bufsize / 8 / nvir**2))
             n = len(ind)
@@ -414,16 +413,13 @@ def kernel(mycc, eris, t1=None, t2=None, projector=None, with_em=False):
         if projector[igpu] is None:
             r3(vr6, wr6)
             div_d3(nocc, *abc, e_occ[igpu], e_vir[igpu], wr6)
-            if with_em:
-                lib.contraction('nijp', wr6, 'nijq', vr6, 'pq', et, beta=1.0)
-            else:
-                et += wr6.ravel().dot(vr6.ravel())
+            lib.contraction('nijk', wr6, 'nijk', vr6, '', et, beta=1.0)
         else:
             r3(wr6, vr6)
             wr6_tmp = tmpbuf.empty(wr6.shape, 'f8')
             lib.contraction('nijp', vr6, 'pk', projector[igpu], 'nijk', wr6_tmp)
             div_d3(nocc, *abc, e_occ[igpu], e_vir[igpu], wr6_tmp)
-            et += wr6_tmp.ravel().dot(wr6.ravel())
+            lib.contraction('nijk', wr6_tmp, 'nijk', wr6, '', et, beta=1.0)
             wr6[:] = wr6_tmp
 
     def add_v_e(abc, wr6, mode, x, y, tmpbuf):
@@ -450,10 +446,7 @@ def kernel(mycc, eris, t1=None, t2=None, projector=None, with_em=False):
 
     def reducetask(et, p):
         if et is None:
-            if with_em:
-                et = cupy.zeros((nocc, nocc), 'f8')
-            else:
-                et = cupy.asarray(0, 'f8')
+            et = cupy.asarray(0, 'f8')
         if p is None:
             return et
         p0, p1 = p
@@ -475,19 +468,13 @@ def kernel(mycc, eris, t1=None, t2=None, projector=None, with_em=False):
             add_v_e([abc[i] for i in ind], wr6, mode, x[q0:q1], y[q0:q1],
                     tmpbuf)
             q0, q1 = q1, q1 + 2
-        if with_em:
-            lib.contraction('bnp', x, 'bnq', y, 'pq', et, beta=1.0)
-        else:
-            et += x.ravel().dot(y.ravel())
+        lib.contraction('bnk', x, 'bnk', y, '', et, beta=1.0)
 
         time1 = log.timer_debug1(
             'ccsdt GPU%d [%d:%d]/%d' % (Mg.gpus[igpu], p0, p1, nabc), *time1)
         return et
 
     et = Mg.reduce(reducetask, list(prange(0, nabc, blksize)))
-    if with_em:
-        et = et * 2
-    else:
-        et = et.item() * 2
+    et = et.item() * 2
     log.timer_debug1('ccsdt', *time0)
     return et

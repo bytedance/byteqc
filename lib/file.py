@@ -19,7 +19,6 @@ import os
 import pickle
 import shutil
 import warnings
-import threading
 from multiprocessing import Pool
 from numbers import Integral
 from byteqc.lib.array import empty_from_buf, MemoryTypeHost, arr2ptr, ptr2arr
@@ -76,83 +75,6 @@ def ioMp(pool, iotype, path, arr, src, dest, dataset='DatasetMp'):
     else:
         raise ValueError("Unknown iotype (%s)" % iotype)
     return r
-
-
-class _AutoClosePoolState:
-    '''Close an internally-created Pool after submitting tasks and join it once
-    all returned AsyncResults have been waited on.
-    '''
-
-    def __init__(self, pool, count):
-        self.pool = pool
-        self.count = count
-        self.lock = threading.Lock()
-        self.closed = False
-        self.joined = False
-
-    def close(self):
-        with self.lock:
-            if not self.closed:
-                self.pool.close()
-                self.closed = True
-            do_join = self.count == 0 and not self.joined
-        if do_join:
-            self.join()
-
-    def done(self):
-        with self.lock:
-            if self.count > 0:
-                self.count -= 1
-            do_join = self.closed and self.count == 0 and not self.joined
-        if do_join:
-            self.join()
-
-    def join(self):
-        with self.lock:
-            if self.joined:
-                return
-            self.joined = True
-            pool = self.pool
-        pool.join()
-
-
-class _AutoCloseAsyncResult:
-    '''AsyncResult wrapper that joins the private Pool after all waits finish.'''
-
-    def __init__(self, result, state):
-        self.result = result
-        self.state = state
-        self.waited = False
-
-    def _mark_done(self):
-        if not self.waited:
-            self.waited = True
-            self.state.done()
-
-    def wait(self, *args, **kwargs):
-        ret = self.result.wait(*args, **kwargs)
-        if self.result.ready():
-            self._mark_done()
-        return ret
-
-    def get(self, *args, **kwargs):
-        try:
-            return self.result.get(*args, **kwargs)
-        finally:
-            if self.result.ready():
-                self._mark_done()
-
-    def __getattr__(self, name):
-        return getattr(self.result, name)
-
-
-def _close_internal_pool(pool, waits, owns_pool):
-    if not owns_pool:
-        return waits
-    state = _AutoClosePoolState(pool, len(waits))
-    wrapped = [_AutoCloseAsyncResult(w, state) for w in waits]
-    state.close()
-    return wrapped
 
 
 class FutureNumpy(numpy.ndarray):
@@ -389,7 +311,6 @@ class DatasetMp():
             assert is_pinned(buf), "buf must be pinned!"
         out = empty_from_buf(buf, out_shape, self.dtype, type=MemoryTypeHost)
         procs = []
-        owns_pool = pool is None
         if pool is None:
             pool = Pool(processes=NumFileProcess)
         else:
@@ -408,7 +329,6 @@ class DatasetMp():
                 p = ioMp(pool, 'read', self.dir + indfmt(ind) + '.dat',
                          out.reshape(ndimshape), src, dest)
             procs.append(p)
-        procs = _close_internal_pool(pool, procs, owns_pool)
         return FutureNumpy(out, procs)
 
     def __setitem__(self, k, v):
@@ -433,7 +353,6 @@ class DatasetMp():
         v = v.reshape(vshape)
         super_keys = (numpy.unique(self.inds[i][keys[i]]) for i in range(ndim))
         waits = []
-        owns_pool = pool is None
         if pool is None:
             pool = Pool(processes=NumFileProcess)
         for ind in product(*super_keys):
@@ -443,7 +362,6 @@ class DatasetMp():
             p = ioMp(pool, 'write', self.dir + indfmt(ind) + '.dat',
                     v, src, dest)
             waits.append(p)
-        waits = _close_internal_pool(pool, waits, owns_pool)
         return waits
 
 

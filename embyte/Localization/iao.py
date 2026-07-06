@@ -13,55 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from functools import reduce
 from pyscf import gto
 from pyscf.data.elements import is_ghost_atom
 from pyscf.lo.iao import reference_mol
 from pyscf.pbc import gto as pbcgto
-from byteqc import lib
 import numpy
 import cupy
 cupy.cuda.set_pinned_memory_allocator(None)
 
 
-def _free_gpu_memory():
-    cupy.cuda.get_current_stream().synchronize()
-    lib.free_all_blocks()
-    cupy.get_default_memory_pool().free_all_blocks()
-    cupy.get_default_pinned_memory_pool().free_all_blocks()
+def get_vec_lowdin(c, s=1, tol=1e-14):
 
-
-def get_vec_lowdin(c, s=1, tol=1e-14, orth_method='lowdin'):
-
-    if numpy.isscalar(s):
-        sc = c if s == 1 else c * s
-    else:
-        sc = cupy.dot(s, c)
-    metric = cupy.dot(c.T, sc)
-    if sc is not c:
-        del sc
-    metric = (metric + metric.T) * 0.5
-
-    if orth_method == 'cholesky':
-        chol = cupy.linalg.cholesky(metric)
-        del metric
-        c_t = cupy.ascontiguousarray(c.T)
-        lo_t = lib.solve_triangular(chol, c_t, lower=True, overwrite_b=True)
-        del chol, c_t
-        lo_lowdin = lo_t.T
-        _free_gpu_memory()
-        return lo_lowdin
-
-    if orth_method != 'lowdin':
-        raise ValueError(f'Unknown orth_method {orth_method}')
-
-    e, v = cupy.linalg.eigh(metric)
-    del metric
+    e, v = cupy.linalg.eigh(reduce(cupy.dot, (c.T, s, c)))
     ind = e > tol
     ct = cupy.dot(v[:, ind] / (e[ind] ** 0.5), v[:, ind].T)
-    del e, v, ind
     lo_lowdin = cupy.dot(c, ct)
-    del ct
-    _free_gpu_memory()
 
     return lo_lowdin
 
@@ -74,15 +41,10 @@ def reference_mol_get_mask(mol):
     return mask
 
 
-def iao_pao_localization(mol, mf, minao='minao', tol=1e-12, just_iao=False):
+def iao_pao_localization(mol, mf, minao='minao', tol=1e-12):
 
-    mf_mo_occ = numpy.asarray(mf.mo_occ)
-    nocc = int(numpy.count_nonzero(mf_mo_occ > 0))
-    if isinstance(mf.mo_coeff, cupy.ndarray):
-        aomo_coeff_occ = cupy.asarray(mf.mo_coeff[:, : nocc])
-    else:
-        aomo_coeff_occ = cupy.asarray(numpy.asarray(mf.mo_coeff)[:, : nocc])
-    del mf_mo_occ
+    nocc = numpy.where(cupy.asarray(mf.mo_occ) > 0)[0].size
+    aomo_coeff_occ = cupy.asarray(mf.mo_coeff)[:, : nocc]
 
     ref_mol = reference_mol(mol, minao)
 
@@ -112,77 +74,35 @@ def iao_pao_localization(mol, mf, minao='minao', tol=1e-12, just_iao=False):
 
     ao_ovlp_CD = cupy.linalg.cholesky(ao_ovlp)
     ref_ao_ovlp_CD = cupy.linalg.cholesky(ref_ao_ovlp)
-    del ref_ao_ovlp
-    _free_gpu_memory()
 
-    tmp = cupy.dot(cross_ovlp.T, aomo_coeff_occ)
-    tmp_solve = cupy.linalg.solve(ref_ao_ovlp_CD, tmp)
-    del tmp
-    coeff_inter = cupy.linalg.solve(ref_ao_ovlp_CD.T, tmp_solve)
-    del tmp_solve, ref_ao_ovlp_CD
-    _free_gpu_memory()
+    coeff_inter = cupy.linalg.solve(ref_ao_ovlp_CD.T,
+                                    cupy.linalg.solve(ref_ao_ovlp_CD,
+                                                      cupy.dot(cross_ovlp.T, aomo_coeff_occ)))
+    coeff_inter = cupy.linalg.solve(ao_ovlp_CD.T,
+                                    cupy.linalg.solve(ao_ovlp_CD,
+                                                      cupy.dot(cross_ovlp, coeff_inter)))
 
-    tmp = cupy.dot(cross_ovlp, coeff_inter)
-    del coeff_inter
-    tmp_solve = cupy.linalg.solve(ao_ovlp_CD, tmp)
-    del tmp
-    coeff_inter = cupy.linalg.solve(ao_ovlp_CD.T, tmp_solve)
-    del tmp_solve
-    _free_gpu_memory()
-
-    tmp = cupy.dot(ao_ovlp, coeff_inter)
-    metric = cupy.dot(coeff_inter.T, tmp)
-    del tmp
-    e_tmp, v_tmp = cupy.linalg.eigh(metric)
-    del metric
+    e_tmp, v_tmp = cupy.linalg.eigh(reduce(cupy.dot,
+                                           (coeff_inter.T, ao_ovlp, coeff_inter)))
     ind_s = e_tmp > tol
     ct = v_tmp[:, ind_s] / (e_tmp[ind_s] ** 0.5)
-    del e_tmp, v_tmp, ind_s
-    coeff_inter_raw = coeff_inter
-    coeff_inter = cupy.dot(coeff_inter_raw, ct)
-    del coeff_inter_raw, ct
-    _free_gpu_memory()
+    coeff_inter = cupy.dot(coeff_inter, ct)
 
-    occ_t_s = cupy.dot(aomo_coeff_occ.T, ao_ovlp)
-    Cocc_ovlp = cupy.dot(aomo_coeff_occ, occ_t_s)
-    del occ_t_s, aomo_coeff_occ
-    _free_gpu_memory()
+    Cocc_ovlp = reduce(cupy.dot, (aomo_coeff_occ, aomo_coeff_occ.T, ao_ovlp))
+    inter_ovlp = reduce(cupy.dot, (coeff_inter, coeff_inter.T, ao_ovlp))
 
-    inter_t_s = cupy.dot(coeff_inter.T, ao_ovlp)
-    inter_ovlp = cupy.dot(coeff_inter, inter_t_s)
-    del inter_t_s, coeff_inter
-    _free_gpu_memory()
+    project_t = cupy.linalg.solve(ao_ovlp_CD.T,
+                                  cupy.linalg.solve(ao_ovlp_CD, cross_ovlp))
 
-    tmp_solve = cupy.linalg.solve(ao_ovlp_CD, cross_ovlp)
-    del cross_ovlp
-    project_t = cupy.linalg.solve(ao_ovlp_CD.T, tmp_solve)
-    del tmp_solve, ao_ovlp_CD
-    _free_gpu_memory()
+    coeff_iao = (project_t
+                 + reduce(cupy.dot, (Cocc_ovlp, inter_ovlp, project_t)) * 2
+                 - cupy.dot(Cocc_ovlp, project_t)
+                 - cupy.dot(inter_ovlp, project_t))
 
-    inter_project = cupy.dot(inter_ovlp, project_t)
-    del inter_ovlp
-    cocc_project = cupy.dot(Cocc_ovlp, project_t)
-    cocc_inter_project = cupy.dot(Cocc_ovlp, inter_project)
-    del Cocc_ovlp
-    _free_gpu_memory()
+    coeff_iao = get_vec_lowdin(coeff_iao, ao_ovlp)
 
-    coeff_iao = project_t
-    del project_t
-    coeff_iao -= cocc_project
-    coeff_iao -= inter_project
-    coeff_iao += cocc_inter_project
-    coeff_iao += cocc_inter_project
-    del cocc_project, inter_project, cocc_inter_project
-
-    coeff_iao_raw = coeff_iao
-    coeff_iao = get_vec_lowdin(coeff_iao_raw, ao_ovlp)
-    del coeff_iao_raw
-    _free_gpu_memory()
-
-    if coeff_iao.shape[0] == coeff_iao.shape[1] or just_iao:
+    if coeff_iao.shape[0] == coeff_iao.shape[1]:
         # The mol has the same basis size with the IAO reference mol.
-        del ao_ovlp
-        _free_gpu_memory()
         return coeff_iao
 
     mol_ao_labels = numpy.asarray(mol.ao_labels())
@@ -199,21 +119,10 @@ def iao_pao_localization(mol, mf, minao='minao', tol=1e-12, just_iao=False):
     npao = len(pao_ind)
     assert niao + npao == mol.nao
 
-    iao_t_s = cupy.dot(coeff_iao.T, ao_ovlp)
-    iao_ovlp = cupy.dot(coeff_iao, iao_t_s)
-    del iao_t_s
-    _free_gpu_memory()
+    iao_ovlp = reduce(cupy.dot, (coeff_iao, coeff_iao.T, ao_ovlp))
 
-    coeff_pao = -cupy.ascontiguousarray(iao_ovlp[:, pao_ind])
-    del iao_ovlp
-    pao_ind_gpu = cupy.asarray(pao_ind)
-    coeff_pao[pao_ind_gpu, cupy.arange(npao)] += 1.0
-    del pao_ind_gpu
-    coeff_pao_raw = coeff_pao
-    _free_gpu_memory()
-    coeff_pao = get_vec_lowdin(coeff_pao_raw, ao_ovlp)
-    del coeff_pao_raw, ao_ovlp
-    _free_gpu_memory()
+    coeff_pao = (cupy.eye(mol.nao) - iao_ovlp)[:, pao_ind]
+    coeff_pao = get_vec_lowdin(coeff_pao, ao_ovlp)
 
     mol_atom_orb_num = numpy.array(mol.ao_labels(fmt=False))
     mol_atom_orb_num = numpy.array(mol_atom_orb_num[:, 0], dtype=int)
@@ -244,7 +153,5 @@ def iao_pao_localization(mol, mf, minao='minao', tol=1e-12, just_iao=False):
             coeff_iao_split, coeff_pao_split)]
 
     coeff_iao_pao = cupy.hstack(c_iao_parts)
-    del c_iao_parts, coeff_iao_split, coeff_pao_split, coeff_iao, coeff_pao
-    _free_gpu_memory()
 
     return coeff_iao_pao

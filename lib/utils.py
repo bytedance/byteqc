@@ -15,7 +15,6 @@
 
 import cupy
 import numpy
-import gc
 from byteqc.lib.array import empty_from_buf
 from pyscf.lib import HERMITIAN
 
@@ -49,9 +48,7 @@ def free_all_blocks():
     '''
     Free all blocks in cupy memory pool.
     '''
-    cupy.cuda.get_current_stream().synchronize()
     cupy.get_default_memory_pool().free_all_blocks()
-    gc.collect()
 
 
 def pool_status():

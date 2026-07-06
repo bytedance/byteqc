@@ -42,13 +42,7 @@ import numpy
 import scipy
 import cupy
 import cupy_backends.cuda.libs.cutensor as cutensorlib
-try:
-    import cupyx.cutensor as cutensor
-except ImportError:
-    try:
-        import cupy.cutensor as cutensor
-    except ImportError:
-        raise ImportError('Both cupyx.cutensor and cupy.cutensor is available! Check the cupy version')
+import cupy.cutensor as cutensor
 import nvmath
 from nvmath.bindings import cublas as nvcublas
 from nvmath.bindings import cusolverDn as nvcusolverDn

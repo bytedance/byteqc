@@ -498,7 +498,6 @@ def make_RDM1_equi_pair_group(PR, LG, fragments, equi_part, equi_pair_group,
 
                 buff_tmp_y_slice_size = iy * ay * by
 
-                lib.free_all_blocks()
                 if buff_total is not None:
                     buff_total[:] = 0
                 else:
@@ -513,22 +512,13 @@ def make_RDM1_equi_pair_group(PR, LG, fragments, equi_part, equi_pair_group,
                 remain_size = buff_total.size - fy * fx * ay * by - fx * fy * ax * ay \
                     - fy * iy * fx * ix * 2 - fx * fy * ax * ay
 
-                slice_len1 = int(remain_size
+                slice_len = int(remain_size
                                 / (buff_tmp1_slice_size
                                    + buff_tmp2_slice_size
                                    + buff_tmp_y_slice_size))
-                a_tmp = ix * iy
-                b_tmp = buff_tmp2_slice_size + buff_tmp_y_slice_size
-                c_tmp = -1 * remain_size
-                slice_len2 = int((-b_tmp + numpy.sqrt(b_tmp ** 2 - 4 * a_tmp * c_tmp)) / (2 * a_tmp))
-                slice_len = min(slice_len1, slice_len2)
+                while slice_len ** 2 * ix * iy > buff_tmp1_slice_size * slice_len:
+                    slice_len -= 1
                 assert slice_len > 0
-                if slice_len > max(fx, fy):
-                    slice_len = max(fx, fy)
-                # else:
-                #     while slice_len ** 2 * ix * iy > buff_tmp1_slice_size * slice_len:
-                #         slice_len -= 1
-                #     assert slice_len > 0
 
                 buff_shift = 0
                 tmp_fFab = cupy.ndarray(
@@ -551,11 +541,8 @@ def make_RDM1_equi_pair_group(PR, LG, fragments, equi_part, equi_pair_group,
                 buff_shift += fx * fy * ax * ay
 
                 buff_tmp1 = buff_total[buff_shift: buff_shift
-                                       + max(buff_tmp1_slice_size * min(slice_len, fx),
-                                             slice_len ** 2 * ix * iy)
-                                       ]
-                assert buff_tmp1.size == max(buff_tmp1_slice_size * min(slice_len, fx),
-                                             slice_len ** 2 * ix * iy)
+                                       + buff_tmp1_slice_size * min(slice_len, fx)]
+                assert buff_tmp1.size == buff_tmp1_slice_size * min(slice_len, fx)
                 buff_shift += buff_tmp1_slice_size * min(slice_len, fx)
 
                 buff_tmp2 = buff_total[buff_shift: buff_shift

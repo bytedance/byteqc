@@ -18,7 +18,6 @@ from pyscf.lib import prange
 from byteqc.cump2.dfmp2 import div_t2
 from byteqc.embyte.Tools.tool_lib import fix_orbital_sign
 from byteqc.embyte.ERI import eri_trans
-# from byteqc.embyte.ERI import eri_trans_gpu4pyscf as eri_trans_g
 from byteqc import lib
 from functools import reduce
 import numpy
@@ -47,7 +46,6 @@ def SIE_BNO_builder(low_level_info, fb_size_list, LOEO,
     fb_n_electron = numpy.sum(EO_occupation[fb_list])
     fb_nocc = int(fb_n_electron // 2)
 
-
     tot_nocc = int(low_level_info.mol_full.nelectron // 2)
 
     assert fb_n_electron % 2 == 0, 'fragment + bath electron number' \
@@ -65,28 +63,23 @@ def SIE_BNO_builder(low_level_info, fb_size_list, LOEO,
     LO_fb_MO_vir = LO_fb_MO[:, fb_MO_vir_list].copy()
     fb_EO_fb_MO = fock_fb_EO = LO_fb_EO = LO_fb_MO = None
 
-    lomo_cpu = low_level_info.LOMO
     subspace_fb_occ_full_vir_LOMO = cupy.hstack(
-        (LO_fb_MO_occ, cupy.asarray(lomo_cpu[:, tot_nocc:])))
+        (LO_fb_MO_occ, cupy.asarray(low_level_info.LOMO[:, tot_nocc:])))
     subspace_full_occ_fb_vir_LOMO = cupy.hstack(
-        (cupy.asarray(lomo_cpu[:, : tot_nocc]), LO_fb_MO_vir))
+        (cupy.asarray(low_level_info.LOMO[:, : tot_nocc]), LO_fb_MO_vir))
     subspace_fb_occ_full_vir_mo_energy = list(
-        fb_mo_energy.get(blocking=True)[: fb_nocc]) + list(low_level_info.mo_energy[tot_nocc:])
+        fb_mo_energy.get()[: fb_nocc]) + list(low_level_info.mo_energy[tot_nocc:])
     subspace_full_occ_fb_vir_mo_energy = list(
-        low_level_info.mo_energy[: tot_nocc]) + list(fb_mo_energy.get(blocking=True)[fb_nocc:])
-    del lomo_cpu
-    LO_fb_MO_occ = LO_fb_MO_vir = None
+        low_level_info.mo_energy[: tot_nocc]) + list(fb_mo_energy.get()[fb_nocc:])
 
-    aolo_gpu = cupy.asarray(low_level_info.AOLO)
     subspace_fb_occ_full_vir_AOMO = cupy.dot(
-        aolo_gpu,
+        low_level_info.AOLO,
         subspace_fb_occ_full_vir_LOMO).get(
         blocking=True)
     subspace_full_occ_fb_vir_AOMO = cupy.dot(
-        aolo_gpu,
+        low_level_info.AOLO,
         subspace_full_occ_fb_vir_LOMO).get(
         blocking=True)
-    del aolo_gpu
 
     subspace_fb_occ_full_vir_LOMO = subspace_fb_occ_full_vir_LOMO.get(
         blocking=True)
@@ -97,9 +90,10 @@ def SIE_BNO_builder(low_level_info, fb_size_list, LOEO,
     gc.collect()
 
     if eri is None:
+
         ovL_fb_occ_full_vir, voL_full_occ_fb_vir = eri_trans.eri_OVL_SIE_MP2(
-            low_level_info.eri_mol,
-            low_level_info.eri_auxmol,
+            low_level_info.mol_full,
+            low_level_info.auxmol,
             subspace_fb_occ_full_vir_AOMO[:, : fb_nocc],
             subspace_fb_occ_full_vir_AOMO[:, fb_nocc:],
             subspace_full_occ_fb_vir_AOMO[:, : tot_nocc],
@@ -107,11 +101,8 @@ def SIE_BNO_builder(low_level_info, fb_size_list, LOEO,
             low_level_info.j2c,
             logger,
             vhfopt=vhfopt,
-            kpts=low_level_info.kpts,
         )
     else:
-        if low_level_info.kpts is not None:
-            raise NotImplementedError('On-disk ovL build is not supported when kpts is provided')
         ovL_fb_occ_full_vir, voL_full_occ_fb_vir = eri_trans.eri_ondisk_OVL_SIE_MP2(
             low_level_info.mol_full,
             eri,
@@ -229,7 +220,7 @@ def SIE_BNO_builder(low_level_info, fb_size_list, LOEO,
                 gamma_vir_d,
                 alpha=2.0,
                 beta=1.0)
-        cupy.cuda.get_current_stream().synchronize()
+
         logger.info('mp2 nocc:[%d:%d]/%d' % (so1.start, so1.stop, nocc))
 
     t2s_d = tuas_d = isa_d = jsb_d = ia_d = t2_d = tua_d = jb_d = vir_energy = occ_energy = None
@@ -244,27 +235,17 @@ def SIE_BNO_builder(low_level_info, fb_size_list, LOEO,
          gamma_vir_d,
          moeo_vir_coeff))
 
-    mo_vir_coeff = moeo_vir_coeff \
-        = subspace_fb_occ_full_vir_mo_energy = ovL_fb_occ_full_vir \
-        = subspace_fb_occ_full_vir_LOMO = None
-
-    lib.free_all_blocks()
-    gc.collect()
-
     ele_diff_vir, EOBNO_vir = cupy.linalg.eigh(gamma_vir_d)
-    gamma_vir_d = None
     EOBNO_vir = fix_orbital_sign(EOBNO_vir)
-    LOBNO_vir = cupy.dot(eo_vir_coeff, EOBNO_vir).get(blocking=True)
-    EOBNO_vir = eo_vir_coeff = None
-
-    lib.free_all_blocks()
-    gc.collect()
-
-    ele_diff_vir = ele_diff_vir.get(blocking=True)
+    LOBNO_vir = cupy.dot(eo_vir_coeff, EOBNO_vir).get()
+    ele_diff_vir = ele_diff_vir.get()
     if numpy.any(ele_diff_vir < 0):
         assert numpy.isclose(
             0, ele_diff_vir[numpy.where(ele_diff_vir < 0)[0]]).all()
 
+    mo_vir_coeff = eo_vir_coeff = moeo_vir_coeff = gamma_vir_d \
+        = subspace_fb_occ_full_vir_mo_energy = ovL_fb_occ_full_vir \
+        = subspace_fb_occ_full_vir_LOMO = None
 
     lib.free_all_blocks()
     gc.collect()
@@ -375,7 +356,6 @@ def SIE_BNO_builder(low_level_info, fb_size_list, LOEO,
                 alpha=-2.0,
                 beta=1.0)
 
-        cupy.cuda.get_current_stream().synchronize()
         logger.info('mp2 nvir:[%d:%d]/%d' % (sv1.start, sv1.stop, nvir))
 
     t2s_d = tuas_d = asi_d = bsj_d = ai_d = t2_d = \
@@ -393,8 +373,8 @@ def SIE_BNO_builder(low_level_info, fb_size_list, LOEO,
 
     ele_diff_occ, EOBNO_occ = cupy.linalg.eigh(gamma_occ_d)
     EOBNO_occ = fix_orbital_sign(EOBNO_occ)
-    LOBNO_occ = cupy.dot(eo_occ_coeff, EOBNO_occ).get(blocking=True)
-    ele_diff_occ = ele_diff_occ.get(blocking=True)
+    LOBNO_occ = cupy.dot(eo_occ_coeff, EOBNO_occ).get()
+    ele_diff_occ = ele_diff_occ.get()
     assert not numpy.any(ele_diff_occ > 1e-10)
     ele_diff_occ = abs(ele_diff_occ)
 

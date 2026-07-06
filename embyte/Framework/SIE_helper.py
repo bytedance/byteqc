@@ -13,99 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from byteqc import lib
+from functools import reduce
 from byteqc.embyte.Tools.tool_lib import fix_orbital_sign
 import numpy
 import cupy
-import cupyx
 cupy.cuda.set_pinned_memory_allocator(None)
 
 
-def _free_gpu_memory():
-    cupy.cuda.get_current_stream().synchronize()
-    lib.free_all_blocks()
-    cupy.get_default_memory_pool().free_all_blocks()
-    cupy.get_default_pinned_memory_pool().free_all_blocks()
-
-
-def _choose_gpu_tile(nrow, ncol, min_tile=128, max_tile=4096):
-    avail = int(lib.gpu_avail_bytes())
-    target = max(int(avail * 0.35), 64 * 1024 * 1024)
-    tile = min(int(nrow), int(max_tile))
-    while tile > min_tile:
-        # Two skinny coefficient tiles and one square result tile.
-        need = 8 * (2 * tile * max(int(ncol), 1) + tile * tile)
-        if need < target:
-            break
-        tile //= 2
-    return max(1, int(tile))
-
-
-def _scaled_core_coeff_on_gpu(coeff, core_index, sqrt_core_occ):
-    nrow = int(coeff.shape[0])
-    ncore = int(len(core_index))
-    out = cupyx.empty_pinned((nrow, ncore), dtype=numpy.float64, order='C')
-    if ncore == 0:
-        return out
-
-    row_blksize = _choose_gpu_tile(nrow, ncore)
-    sqrt_occ_d = cupy.asarray(sqrt_core_occ, dtype=cupy.float64)
-    coeff_is_gpu = isinstance(coeff, cupy.ndarray)
-    coeff_cpu = None if coeff_is_gpu else numpy.asarray(coeff)
-
-    try:
-        for p0 in range(0, nrow, row_blksize):
-            p1 = min(nrow, p0 + row_blksize)
-            if coeff_is_gpu:
-                block = cupy.ascontiguousarray(coeff[p0:p1][:, core_index])
-            else:
-                block = cupy.asarray(
-                    numpy.asarray(coeff_cpu[p0:p1][:, core_index],
-                                  dtype=numpy.float64, order='C'))
-            block *= sqrt_occ_d[None, :]
-            block.get(out=out[p0:p1], blocking=True)
-            del block
-            _free_gpu_memory()
-    finally:
-        del sqrt_occ_d
-        _free_gpu_memory()
-    return out
-
-
-def _core_dm_from_coeff_on_gpu(core_coeff):
-    nrow, ncore = map(int, core_coeff.shape)
-    out = cupyx.empty_pinned((nrow, nrow), dtype=numpy.float64, order='C')
-    if ncore == 0:
-        out[:] = 0.0
-        return out
-
-    tile = _choose_gpu_tile(nrow, ncore)
-    for i0 in range(0, nrow, tile):
-        i1 = min(nrow, i0 + tile)
-        ci = cupy.asarray(core_coeff[i0:i1], dtype=cupy.float64)
-        for j0 in range(0, i0 + 1, tile):
-            j1 = min(nrow, j0 + tile)
-            if j0 == i0:
-                cj = ci
-            else:
-                cj = cupy.asarray(core_coeff[j0:j1], dtype=cupy.float64)
-            dm_blk = cupy.dot(ci, cj.T)
-            dm_host = cupyx.empty_pinned((i1 - i0, j1 - j0),
-                                         dtype=numpy.float64, order='C')
-            dm_blk.get(out=dm_host, blocking=True)
-            out[i0:i1, j0:j1] = dm_host
-            if i0 != j0:
-                out[j0:j1, i0:i1] = dm_host.T
-            del dm_blk, dm_host
-            if j0 != i0:
-                del cj
-            _free_gpu_memory()
-        del ci
-        _free_gpu_memory()
-    return out
-
-
-def Get_bath(mol, fb_size_list, frag_list, rdm1_low, logger):
+def Get_bath(mol, fb_size_list, frag_list, rdm1_low):
     '''
     Calculate bath based on given framgment orbitals.
     '''
@@ -124,15 +39,8 @@ def Get_bath(mol, fb_size_list, frag_list, rdm1_low, logger):
 
     norb_bath = numpy.sum(-numpy.maximum(-occupation_env,
                           occupation_env - 2.0)[new_ind] > 1e-8)
-    if norb_bath > fb_size_list[0]:
-        logger.info(f'bath orbitals number : {norb_bath}, fragment orbitals number : {fb_size_list[0]}, where bath size > fragment size with the therehold of 1e-8.')
-        logger.info(f'Use fragment orbitals number as bath size.')
-        index_tmp = -numpy.maximum(-occupation_env,
-                                occupation_env - 2.0)[new_ind] > 1e-8
-        occ_env = (-numpy.maximum(-occupation_env,
-                                occupation_env - 2.0)[new_ind])[index_tmp]
-        logger.info(f'Occupation of bath orbitals : {occ_env}')
-        norb_bath = fb_size_list[0]
+    assert norb_bath < fb_size_list[0] or numpy.isclose(norb_bath, fb_size_list[0]), \
+        f'bath orbitals number : {norb_bath}, fragment orbitals number : {fb_size_list[0]}, where bath size > fragment size.'
     fb_size_list.append(int(norb_bath))
     occupation_env = occupation_env[new_ind]
     coeff_env = coeff_env[:, new_ind]
@@ -178,14 +86,31 @@ def Impurity_1rdm(cluster_list, coeff, core_occupied,
     number_electrons = round(
         number_active_electrons
         - numpy.sum(core_occupied))
+    try:
+        core_occupied_onerdm = reduce(
+            numpy.dot, (coeff, numpy.diag(core_occupied), coeff.T))
+    except BaseException:
+        core_occupied_onerdm = reduce(
+            numpy.dot, (coeff.get(), numpy.diag(core_occupied), coeff.get().T))
 
     core_index = numpy.where(
         numpy.logical_not(
             numpy.isclose(
                 core_occupied,
                 0)))[0]
-    sqrt_core_occ = core_occupied[core_index] ** 0.5
-    rdm1_core_coeff = _scaled_core_coeff_on_gpu(
-        coeff, core_index, sqrt_core_occ)
+    core_occupied = core_occupied[core_index]
+    core_occupied = core_occupied ** 0.5
+    try:
+        rdm1_core_coeff = reduce(
+            numpy.dot, (coeff[:, core_index], numpy.diag(core_occupied)))
+    except BaseException:
+        rdm1_core_coeff = reduce(
+            numpy.dot, (coeff.get()[:, core_index], numpy.diag(core_occupied)))
 
-    return number_electrons, rdm1_core_coeff
+    assert numpy.allclose(
+        numpy.dot(
+            rdm1_core_coeff,
+            rdm1_core_coeff.T),
+        core_occupied_onerdm)
+
+    return number_electrons, core_occupied_onerdm, rdm1_core_coeff

@@ -99,9 +99,6 @@ class SIE_kernel:
         self.pair_group_size = 500
         self.t2_y_buffer_pool_size = RDM_MEMORY_POOL_SIZE
         self.local_orb_path = None
-        self.ewald_correct = False
-        self.mf_with_ewald = None
-        self.kpts = None
 
     def simulate(self, molecule, mean_field, fragments):
 
@@ -118,22 +115,6 @@ class SIE_kernel:
 
         if type(fragments) is not list:
             raise ValueError
-        if self.kpts is not None and getattr(molecule, 'pbc_intor', None) is None:
-            raise ValueError('kpts is only supported for periodic systems')
-        if self.kpts is not None and self.RDM:
-            raise NotImplementedError('RDM route is not supported when kpts is provided')
-        if getattr(molecule, 'pbc_intor', None) is not None:
-            if self.jk_file is None or self.oei_file is None:
-                raise ValueError(
-                    'Periodic systems require explicit jk_file and oei_file. '
-                    'Internal JK/OEI generation is disabled to avoid mixed logic.'
-                )
-            if self.mf_with_ewald is None:
-                raise ValueError(
-                    'For periodic SIE, please set SIE_class.mf_with_ewald to True or False. '
-                    'Use True if the loaded mean-field mo_energy contains PySCF exxdiv="ewald" '
-                    'occupied-orbital shifts; use False otherwise.'
-                )
 
         orb_list = []
         equivalent_list = []
@@ -225,13 +206,6 @@ class SIE_kernel:
             self.LG.logger.info(
                 '=== Run HF for full system and build low_level_info')
 
-            if self.ewald_correct:
-                assert getattr(molecule, 'pbc_intor', None), \
-                    'Ewald correction only supports PBC, please check the input molecule!'
-                if self.RDM and 'MP2' in self.electronic_structure_solver.__name__:
-                    self.LG.logger.info(
-                        'Warning! When Ewald correction is enabled, RDM calculated energy will be no longer reliable for MP2!')
-
             if self.aux_basis is not None:
                 self.LG.logger.info(
                     f'--- The aux basis used %s' %
@@ -253,23 +227,12 @@ class SIE_kernel:
                 self.LG.logger.info(
                     'check file path: %s' %
                     self.PR.recorder['HF_chkfile'])
+                from pyscf import scf
+                mean_field = scf.RHF(molecule)
+                mean_field.verbose = 4
                 try:
-                    if getattr(molecule, 'pbc_intor', None):
-                        from pyscf.pbc import scf as pbcscf
-                        if self.kpts is not None:
-                            mean_field = pbcscf.KRHF(
-                                molecule, kpts=numpy.asarray(self.kpts), exxdiv=None)
-                        else:
-                            mean_field = pbcscf.RHF(molecule, exxdiv=None)
-                        mean_field.verbose = 4
-                        mean_field.__dict__.update(pbcscf.chkfile.load(
-                            self.PR.recorder['HF_chkfile'], 'scf'))
-                    else:
-                        from pyscf import scf
-                        mean_field = scf.RHF(molecule)
-                        mean_field.verbose = 4
-                        mean_field.__dict__.update(scf.chkfile.load(
-                            self.PR.recorder['HF_chkfile'], 'scf'))
+                    mean_field.__dict__.update(scf.chkfile.load(
+                        self.PR.recorder['HF_chkfile'], 'scf'))
                     self.LG.logger.info(
                         '=== Load Check Point: load mean_field for full system')
                 except BaseException:
@@ -286,11 +249,7 @@ class SIE_kernel:
 
                     if getattr(molecule, 'pbc_intor', None):
                         from pyscf.pbc import scf as pbcscf
-                        if self.kpts is not None:
-                            mean_field = pbcscf.KRHF(
-                                molecule, kpts=numpy.asarray(self.kpts), exxdiv=None)
-                        else:
-                            mean_field = pbcscf.RHF(molecule, exxdiv=None)
+                        mean_field = pbcscf.RHF(molecule, exxdiv=None)
                         mean_field.verbose = 4
                         mean_field.__dict__.update(pbcscf.chkfile.load(
                             self.PR.recorder['HF_chkfile'], 'scf'))
@@ -314,97 +273,6 @@ class SIE_kernel:
                 '=== converged SCF energy = %s' %
                 mean_field.e_tot)
 
-            if self.PR.recorder['low_level_info_class']:
-                self.LG.logger.info(
-                    'Load low_level_info class from %s' %
-                    self.PR.recorder['low_level_info_class'])
-                low_level_info = self.PR.load_class(
-                    self.PR.recorder['low_level_info_class'])
-                if self.kpts is None:
-                    low_level_info.mol_full = molecule
-                else:
-                    from pyscf.pbc.tools import k2gamma as pbc_k2gamma
-                    from byteqc.embyte.Tools import k2gamma as gpu_k2gamma
-                    if getattr(low_level_info, 'kmesh', None) is None:
-                        low_level_info.kmesh = numpy.asarray(
-                            pbc_k2gamma.kpts_to_kmesh(
-                                molecule, numpy.asarray(self.kpts)),
-                            dtype=int,
-                        )
-
-                    from pyscf.pbc import tools
-                    low_level_info.mol_full = tools.super_cell(
-                        molecule, low_level_info.kmesh, wrap_around=False)
-                    # low_level_info.mol_full = pbc_k2gamma.k2gamma(
-                    #     mean_field, kmesh=low_level_info.kmesh).cell
-                try:
-                    del low_level_info.mol_full.stdout
-                except:
-                    pass
-                self.low_level_info = low_level_info
-
-            else:
-                self.LG.logger.info('=== build low_level_info class')
-                low_level_info = low_level_process.low_level_info(molecule,
-                                                                  mean_field,
-                                                                  self.LG,
-                                                                  aux_basis=self.aux_basis,
-                                                                  jk_file=self.jk_file,
-                                                                  with_eri=False if self.eri_file is None else True,
-                                                                  oei=self.oei_file,
-                                                                  local_orb_path=self.local_orb_path,
-                                                                  ewald_correct=self.ewald_correct,
-                                                                  kpts=self.kpts,
-                                                                  mf_with_ewald=self.mf_with_ewald,
-                                                                  disk_matrix_file=os.path.join(
-                                                                      self.PR.filepath,
-                                                                      'low_level_info_matrices.h5'),
-                                                                  )
-                if hasattr(low_level_info.mol_full, 'stdout'):
-                    try:
-                        del low_level_info.mol_full.stdout
-                    except:
-                        pass
-                del mean_field
-                self.low_level_info = low_level_info
-
-                low_level_lomo = low_level_info.LOMO
-                low_level_fock_lo = low_level_info.fock_LO
-                Fock_MO = reduce(
-                    cupy.dot, (cupy.asarray(
-                        low_level_lomo.T), cupy.asarray(
-                        low_level_fock_lo), cupy.asarray(
-                        low_level_lomo))).get()
-                numpy.save(
-                    os.path.join(
-                        self.PR.filepath,
-                        'Fock_MO.npy'),
-                    Fock_MO)
-                assert numpy.isclose(low_level_info.mol_full.nelectron % 2, 0)
-                nocc_full = round(low_level_info.mol_full.nelectron // 2)
-                if not numpy.isclose(low_level_info.mol_full.nao - nocc_full,
-                                     low_level_lomo.shape[1] - nocc_full):
-                    self.LG.logger.info(
-                        f'The MO has been cut from {low_level_info.mol_full.nao} to {low_level_lomo.shape[1]}.'
-                        f' It may related to the linear dependency of the basis.')
-                nvir_full = low_level_lomo.shape[1] - nocc_full
-                self.PR.recorder['nocc_nvir_full'] = [
-                    int(nocc_full), int(nvir_full)]
-                self.PR.save()
-
-                del Fock_MO, low_level_lomo, low_level_fock_lo
-
-                if self.PR.chk_point:
-                    self.PR.recorder['low_level_info_class'] = os.path.join(
-                        self.logfile, 'low_level_info_class.pkl')
-                    self.LG.logger.info(
-                        'save low_level_info class in %s' %
-                        self.PR.recorder['low_level_info_class'])
-
-                    self.PR.save_class(
-                        low_level_info, self.PR.recorder['low_level_info_class'])
-                    self.PR.save()
-
             if self.PR.recorder['fragment_group']:
                 self.LG.logger.info(
                     'Load fragment_group class from %s' %
@@ -412,7 +280,6 @@ class SIE_kernel:
                 fragment_group = self.PR.load_class(
                     self.PR.recorder['fragment_group'])
                 self.fragment_group = fragment_group
-
             else:
                 fragment_group = Fragment_group(molecule, fragments)
                 fragment_group.build()
@@ -426,6 +293,66 @@ class SIE_kernel:
                         self.PR.recorder['fragment_group'])
                     self.PR.save_class(
                         fragment_group, self.PR.recorder['fragment_group'])
+                    self.PR.save()
+
+            if self.PR.recorder['low_level_info_class']:
+                self.LG.logger.info(
+                    'Load low_level_info class from %s' %
+                    self.PR.recorder['low_level_info_class'])
+                low_level_info = self.PR.load_class(
+                    self.PR.recorder['low_level_info_class'])
+                low_level_info.mol_full = molecule
+                del low_level_info.mol_full.stdout
+                self.low_level_info = low_level_info
+
+            else:
+                self.LG.logger.info('=== buld low_level_info class')
+                low_level_info = low_level_process.low_level_info(molecule,
+                                                                  mean_field,
+                                                                  self.LG,
+                                                                  aux_basis=self.aux_basis,
+                                                                  jk_file=self.jk_file,
+                                                                  with_eri=False if self.eri_file is None else True,
+                                                                  oei=self.oei_file,
+                                                                  local_orb_path=self.local_orb_path,
+                                                                  )
+                if hasattr(low_level_info.mol_full, 'stdout'):
+                    del low_level_info.mol_full.stdout
+                del mean_field
+                self.low_level_info = low_level_info
+
+                Fock_MO = reduce(
+                    cupy.dot, (cupy.asarray(
+                        low_level_info.LOMO.T), cupy.asarray(
+                        low_level_info.fock_LO), cupy.asarray(
+                        low_level_info.LOMO))).get()
+                numpy.save(
+                    os.path.join(
+                        self.PR.filepath,
+                        'Fock_MO.npy'),
+                    Fock_MO)
+                assert numpy.isclose(low_level_info.mol_full.nelectron % 2, 0)
+                nocc_full = round(low_level_info.mol_full.nelectron // 2)
+                if not numpy.isclose(low_level_info.mol_full.nao - nocc_full,
+                                     low_level_info.LOMO.shape[1] - nocc_full):
+                    self.LG.logger.info(
+                        f'The MO has been cut from {low_level_info.mol_full.nao} to {low_level_info.LOMO.shape[1]}.'
+                        f' It may related to the linear dependency of the basis.')
+                nvir_full = low_level_info.LOMO.shape[1] - nocc_full
+                self.PR.recorder['nocc_nvir_full'] = [
+                    int(nocc_full), int(nvir_full)]
+                self.PR.save()
+                del Fock_MO
+
+                if self.PR.chk_point:
+                    self.PR.recorder['low_level_info_class'] = os.path.join(
+                        self.logfile, 'low_level_info_class.pkl')
+                    self.LG.logger.info(
+                        'save low_level_info class in %s' %
+                        self.PR.recorder['low_level_info_class'])
+
+                    self.PR.save_class(
+                        low_level_info, self.PR.recorder['low_level_info_class'])
                     self.PR.save()
             self.nocc_full = self.PR.recorder['nocc_nvir_full'][0]
             self.nvir_full = self.PR.recorder['nocc_nvir_full'][1]
@@ -539,10 +466,6 @@ class SIE_kernel:
             def wait_return(node_ind, conn, part_list):
                 if node_ind == 0:
                     frag_corr_test, used_orb_num_temp_test = conn.recv()
-                    try:
-                        conn.close()
-                    except BaseException:
-                        pass
                 else:
                     frag_corr_test, used_orb_num_temp_test = comm.recv(
                         source=node_ind, tag=0)
@@ -594,11 +517,7 @@ class SIE_kernel:
 
             if False in self.PR.recorder['Cluster']:
                 self.LG.logger.info('Building vhfopt for all node!')
-                if (
-                    high_level_frag.vhfopt is None
-                    and high_level_frag.eri is None
-                    and not getattr(molecule, 'pbc_intor', None)
-                ):
+                if high_level_frag.vhfopt is None and high_level_frag.eri is None:
                     vhfopt = VHFOpt3c(
                         self.low_level_info.mol_full,
                         self.low_level_info.auxmol,
@@ -611,9 +530,9 @@ class SIE_kernel:
                     except BaseException:
                         pass
                     high_level_frag.vhfopt = vhfopt
-                    gc.collect()
 
                 for equi_ind, part_list in enumerate(equi_part):
+
                     if self.PR.recorder['Cluster'][equi_ind]:
                         self.LG.logger.info(
                             '--- The cluster %s has already be solved! ---' %
@@ -653,9 +572,6 @@ class SIE_kernel:
                     del high_level_frag.vhfopt, vhfopt
                 except BaseException:
                     pass
-                high_level_frag.cleanup_cluster_state()
-                high_level_frag = None
-                gc.collect()
 
             self.used_orb_num = numpy.asarray(
                 self.used_orb_num) / len(self.equivalent_list)
@@ -797,10 +713,6 @@ class SIE_kernel:
                                     equi_pair_group, equi_pair_group_ind, conn):
                     if node_ind == 0:
                         e_corr_rdm1_result, doo_list, dvv_list, dov_list = conn.recv()
-                        try:
-                            conn.close()
-                        except BaseException:
-                            pass
                     else:
                         e_corr_rdm1_result, doo_list, dvv_list, dov_list = comm2.recv(
                             source=node_ind, tag=0)
@@ -1180,37 +1092,27 @@ class SIE_kernel:
                     'Total energy: %s' %
                     (self.energy.tolist()))
 
-                for node_ind_kill in range(1, size):
-                    comm2.send(
-                        False, dest=node_ind_kill, tag=node_ind_kill)
-
             self.PR.recorder['energy'] = self.energy.tolist()
             self.PR.save()
 
             self.LG.logger.info(
                 '-------------- All process finished. Start to clean up!')
-
-            def delete_folders(path, parent_pattern, child_pattern):
-                for root, dirs, _ in os.walk(path):
-                    for dir in fnmatch.filter(dirs, parent_pattern):
-                        cluster_folder = os.path.join(root, dir)
-                        for subroot, subdirs, _ in os.walk(
-                                cluster_folder):
-                            for subdir in fnmatch.filter(
-                                    subdirs, child_pattern):
-                                shutil.rmtree(
-                                    os.path.join(subroot, subdir))
-                                pass
-
             if self.RDM:
                 if False not in self.PR.recorder['RDM']:
-                    delete_folders(
-                        self.PR.filepath + 'Cluster/', 'Cluster_*', 'th*')
-            else:
-                if 'CCSD' in self.electronic_structure_solver.__name__ and self.in_situ_T:
-                    delete_folders(
-                        self.PR.filepath + 'Cluster/', 'Cluster_*', 'th*')
+                    def delete_folders(path, parent_pattern, child_pattern):
+                        for root, dirs, _ in os.walk(path):
+                            for dir in fnmatch.filter(dirs, parent_pattern):
+                                cluster_folder = os.path.join(root, dir)
+                                for subroot, subdirs, _ in os.walk(
+                                        cluster_folder):
+                                    for subdir in fnmatch.filter(
+                                            subdirs, child_pattern):
+                                        shutil.rmtree(
+                                            os.path.join(subroot, subdir))
+                                        pass
 
+                    delete_folders(
+                        self.PR.filepath + 'Cluster/', 'Cluster_*', 'th*')
 
             if self.PR.recorder['Cluster'] == [True] * len(equi_part):
                 try:
@@ -1220,15 +1122,6 @@ class SIE_kernel:
 
                 try:
                     os.remove(self.PR.recorder['low_level_info_class'])
-                except BaseException:
-                    pass
-
-                try:
-                    os.remove(os.path.join(self.PR.filepath, 'low_level_info_matrices.h5'))
-                except BaseException:
-                    pass
-                try:
-                    shutil.rmtree(os.path.join(self.PR.filepath, 'low_level_info_matrices_Mp'))
                 except BaseException:
                     pass
 
@@ -1279,8 +1172,9 @@ class SIE_kernel:
                 part_list = comm.recv(source=0, tag=rank)
                 if part_list:
                     if high_level_frag.vhfopt is None and high_level_frag.eri is None:
-                        with open(low_level_info_class_add, 'rb') as f:
-                            low_level_info = pickle.load(f)
+                        f = open(low_level_info_class_add, 'rb')
+                        low_level_info = pickle.loads(f.read())
+                        f.close()
                         vhfopt = VHFOpt3c(
                             low_level_info.mol_full, low_level_info.auxmol, 'int2e')
                         vhfopt.build(
@@ -1299,24 +1193,16 @@ class SIE_kernel:
                         high_level_frag.vhfopt = vhfopt
 
                         del low_level_info
-                        gc.collect()
 
                     try:
                         frag_corr_test, used_orb_num_temp_test = high_level_frag.kernel(
                             part_list[0])
-                        result = [frag_corr_test, used_orb_num_temp_test]
+                        comm.send(
+                            [frag_corr_test, used_orb_num_temp_test], dest=0, tag=0)
                     except Exception as e:
-                        logger = getattr(getattr(high_level_frag, 'LG', None), 'logger', None)
-                        if logger is not None:
-                            logger.info(e)
-                            logger.info(traceback.format_exc())
-                        else:
-                            print(e)
-                            print(traceback.format_exc())
-                        result = [False, False]
-                    finally:
-                        high_level_frag.cleanup_cluster_state()
-                    comm.send(result, dest=0, tag=0)
+                        high_level_frag.LG.logger.info(e)
+                        high_level_frag.LG.logger.info(traceback.format_exc())
+                        comm.send([False, False], dest=0, tag=0)
                 else:
                     print('Node %s break the solver loop!' % (rank))
                     break
@@ -1324,9 +1210,6 @@ class SIE_kernel:
                 del high_level_frag.vhfopt, vhfopt
             except BaseException:
                 pass
-            high_level_frag.cleanup_cluster_state()
-            high_level_frag = None
-            gc.collect()
             print('Node %s start the 1-RDM loop!' % (rank))
             t2_y_buffer_pool = cupyx.zeros_pinned(
                 (self.t2_y_buffer_pool_size, ), dtype='float64')
@@ -1354,23 +1237,11 @@ def task(high_level_frag, part_list, conn):
     try:
         frag_corr_test, used_orb_num_temp_test = high_level_frag.kernel(
             part_list[0])
-        result = [frag_corr_test, used_orb_num_temp_test]
+        conn.send([frag_corr_test, used_orb_num_temp_test])
     except Exception as e:
-        logger = getattr(getattr(high_level_frag, 'LG', None), 'logger', None)
-        if logger is not None:
-            logger.info(e)
-            logger.info(traceback.format_exc())
-        else:
-            print(e)
-            print(traceback.format_exc())
-        result = [False, False]
-    finally:
-        high_level_frag.cleanup_cluster_state()
-    conn.send(result)
-    try:
-        conn.close()
-    except BaseException:
-        pass
+        high_level_frag.LG.logger.info(e)
+        high_level_frag.LG.logger.info(traceback.format_exc())
+        conn.send([False, False])
 
 
 def task_rdm(params, cheat_th, conn):
@@ -1381,7 +1252,3 @@ def task_rdm(params, cheat_th, conn):
         cheat_th=cheat_th, t2_y_buffer_pool=t2_y_buffer_pool, if_l2=if_l2)
 
     conn.send([corr_energy_list, doo_list, dvv_list, dov_list])
-    try:
-        conn.close()
-    except BaseException:
-        pass
