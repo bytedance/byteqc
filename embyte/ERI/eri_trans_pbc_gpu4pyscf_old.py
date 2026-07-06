@@ -2077,7 +2077,7 @@ def eri_high_level_solver_incore_with_jk(
         )
         cp.cuda.get_current_stream().synchronize()
         lib.free_all_blocks()
-        import ipdb; ipdb.set_trace()
+        # NOTE: Removed stray interactive debugger hook (ipdb.set_trace()) from production path.
         for K0 in range(0, naux_q, Kblksize):
             K1 = min(naux_q, K0 + Kblksize)
             block_len = K1 - K0
