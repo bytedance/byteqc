@@ -594,9 +594,11 @@ class SIE_kernel:
 
             if False in self.PR.recorder['Cluster']:
                 self.LG.logger.info('Building vhfopt for all node!')
-                if high_level_frag.vhfopt is None and \
-                    high_level_frag.eri is None and \
-                    not getattr(molecule, 'pbc_intor', None):
+                if (
+                    high_level_frag.vhfopt is None
+                    and high_level_frag.eri is None
+                    and not getattr(molecule, 'pbc_intor', None)
+                ):
                     vhfopt = VHFOpt3c(
                         self.low_level_info.mol_full,
                         self.low_level_info.auxmol,

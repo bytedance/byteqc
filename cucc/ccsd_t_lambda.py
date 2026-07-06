@@ -345,6 +345,7 @@ def make_intermediates(mycc, t1, t2, eris):
             lib.contraction('nli',lov_1,'nlj',lov_2,'nij',eri_ovov)
 
     # For ovvv, take0110 = take0101 due to the symmetry (ia|bc) = (ia|cb).
+
     def take_ovvv(eri_ovvv, ind1, ind2, lov, lvv):
         if ovvv.l2 is None:  # turn off density fitting
             take0110(nocc, nvir, nvir, nvir, ind1, ind2, ovvv, eri_ovvv)
@@ -364,15 +365,18 @@ def make_intermediates(mycc, t1, t2, eris):
             lib.contraction('nlo', lov, 'lpq', lpq, 'nopq', eri_ovoo)
 
     if t2.dev == 0:  # t2 can be stored in GPU
+
         def take010_t2(out, ind, t2, buf, isTrans=False):
             if isTrans:
                 take0010_t(nocc, nvir, ind, t2, out)
             else:
                 take010(nocc * nocc, nvir, nvir, ind, t2, out)
+
         def take011_t2(out, ind1, ind2, t2, buf):
             take011(nocc * nocc, nvir, nvir, ind1, ind2, t2, out)
     else:
         # t2 can't be stored in GPU
+
         def take010_t2(out, ind, t2, buf, isTrans=False):
             blk = min(nocc * nocc, int(buf.bufsize / 8 / nvir**2))
             n = len(ind)
@@ -388,6 +392,7 @@ def make_intermediates(mycc, t1, t2, eris):
                     take010_s(nocc * nocc, p0, p1, nvir, nvir, ind, t2p, out,
                               size=n * (p1 - p0) * nvir)
             buf.untag('t2')
+
         def take011_t2(out, ind1, ind2, t2, buf):
             n = len(ind1)
             t2 = t2.reshape(nocc**2, nvir, nvir)
@@ -445,6 +450,7 @@ def make_intermediates(mycc, t1, t2, eris):
         n = p1 - p0
         gen_abc(p0, a[:n], b[:n], c[:n])
         abc = [a[:n], b[:n], c[:n]]
+
         def add_w(abc,_bufw):
             w = None
             n = len(abc[0])
@@ -562,6 +568,7 @@ def make_intermediates(mycc, t1, t2, eris):
         tmpbuf = None
 
         # calculate l2 via m and r'
+
         def as_r6(input,output,mode0='nijk',mode1='nkji',mode2='nikj'):
             # When making derivative over t2, r6 should be called on the 6-index
             # tensor. It gives the equation for lambda2, but not corresponding to
@@ -601,6 +608,7 @@ def make_intermediates(mycc, t1, t2, eris):
                         target[i, jj, c1, c2] += update[k, i, jj]
 
         # In the next section, r = as_r6(w), is different from r tensor in the l1_t equation.
+
         def add_k(abc,k,cpu_bufk):
             a,b,c = abc[0],abc[1],abc[2]
             cpu_a, cpu_b, cpu_c = cupy.asnumpy(a), cupy.asnumpy(b), cupy.asnumpy(c)
@@ -723,11 +731,13 @@ def make_intermediates(mycc, t1, t2, eris):
 
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             task_tracker = {}
+
             def dispatch_j1(cpu_buf, idx_c):
                 if id(cpu_buf) in task_tracker:
                     task_tracker[id(cpu_buf)].result()
                 bufj1.get(out=cpu_buf, blocking=True)
                 task_tracker[id(cpu_buf)] = executor.submit(fast_scatter_add_j1, j, idx_c, cpu_buf)
+
             def dispatch_k(cpu_buf, idx_c1, idx_c2):
                 if id(cpu_buf) in task_tracker:
                     task_tracker[id(cpu_buf)].result()
@@ -822,8 +832,10 @@ def make_intermediates(mycc, t1, t2, eris):
     return imds
 
 def update_lambda(mycc, t1, t2, l1, l2, eris=None, imds=None):
-    if eris is None: eris = mycc.ao2mo()
-    if imds is None: imds = make_intermediates(mycc, t1, t2, eris)
+    if eris is None:
+        eris = mycc.ao2mo()
+    if imds is None:
+        imds = make_intermediates(mycc, t1, t2, eris)
     if not hasattr(imds, 'woooo'):
         imds_ccsd = ccsd_lambda.make_intermediates(mycc, t1, t2, eris)
         for k, v in imds_ccsd.__dict__.items():

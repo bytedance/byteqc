@@ -358,7 +358,7 @@ def cderi_ovL_gamma_point_outcore_gpu4pyscf(
                     p.wait()
             out_write_host = lib.empty_from_buf(write_host, (nmo_i, nmo_j, Kblk), 'f8')
             out_tmp.get(out=out_write_host, blocking=True)
-            waits_write =cderi_file.setitem(numpy.s_[:, :, K0:K1], out_write_host, pool=pool_write)
+            waits_write = cderi_file.setitem(numpy.s_[:, :, K0:K1], out_write_host, pool=pool_write)
 
             j3c_pair_blk = None
             j3c_tril = None
@@ -685,8 +685,8 @@ def cderi_ovL_gamma_point_outcore_gpu4pyscf_Mg(
 
     pair_address = Mg.broadcast(pair_address)
     pair_weight = Mg.broadcast(pair_weight)
-    mo_coeff_i =  Mg.broadcast(mo_coeff_i)
-    mo_coeff_j =  Mg.broadcast(mo_coeff_j)
+    mo_coeff_i = Mg.broadcast(mo_coeff_i)
+    mo_coeff_j = Mg.broadcast(mo_coeff_j)
     aux_coeff = Mg.broadcast(aux_coeff)
 
     pool_read = [Pool(processes=int(lib.NumFileProcess / 2)) for _ in range(ngpu)]

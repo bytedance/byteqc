@@ -303,7 +303,8 @@ take1010 = cupy.ElementwiseKernel(
 
 def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
     doo, dov, dvo, dvv = ccsd_rdm._gamma1_intermediates(mycc, t1, t2, l1, l2)
-    if eris is None: eris = mycc.ao2mo()
+    if eris is None:
+        eris = mycc.ao2mo()
 
     nocc, nvir = t1.shape
     nmax = max(nocc, nvir)
