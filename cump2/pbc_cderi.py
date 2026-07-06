@@ -74,7 +74,7 @@ def cderi_ovL_gamma_point_outcore_gpu4pyscf(
         os.mkdir(path)
 
     if log is None:
-        log = log.new_logger(cell, cell.verbose)
+        log = logger.new_logger(cell, cell.verbose)
 
     if omega is None:
         omega = OMEGA_MIN
@@ -440,7 +440,7 @@ def cderi_ovL_gamma_point_outcore_gpu4pyscf_Mg(
         os.mkdir(path)
 
     if log is None:
-        log = log.new_logger(cell, cell.verbose)
+        log = logger.new_logger(cell, cell.verbose)
     time0 = logger.process_clock(), logger.perf_counter()
 
     if omega is None:

@@ -46,7 +46,17 @@ def _normalize_kpts(kpts):
 def _dispatch_periodic_backend(name, mol, auxmol, args, kpts=None, **kwargs):
     kpts = _normalize_kpts(kpts)
     try:
-        if kpts is None or len(kpts) <= 1:
+        is_gamma = (kpts is None)
+        if kpts is not None and len(kpts) == 1:
+            is_gamma = numpy.allclose(kpts[0], 0.0)
+            if not is_gamma:
+                raise NotImplementedError(
+                    "Single k-point (nkpts=1) with non-gamma kpt is not supported by the gamma backend. "
+                    "Provide a Monkhorst-Pack mesh (nkpts>1) or use an implementation that supports non-gamma single k-point. "
+                    f"Got kpt={kpts[0]!r}."
+                )
+
+        if is_gamma:
             from byteqc.embyte.ERI import eri_trans_gpu4pyscf as eri_trans_g
             return getattr(eri_trans_g, name)(mol, auxmol, *args, **kwargs)
         from byteqc.embyte.ERI import eri_trans_pbc_gpu4pyscf as eri_trans_k
