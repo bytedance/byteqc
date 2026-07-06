@@ -203,7 +203,7 @@ class high_level_processing:
                 threshold_cluster = cheat_th
             else:
                 threshold_cluster = self.threshold
-            
+
             lib.free_all_blocks()
             gc.collect()
 
@@ -500,7 +500,11 @@ class high_level_processing:
                     frag_equi_op = self.fragments[equi_frag_ind]['equivalent_operator']
                     AOLO = self.low_level_info.AOLO
                     LOMO = self.low_level_info.LOMO
-                    LO_BNO_clu = LOBNO[:, cluster_list].get(blocking=True)
+                    LO_BNO_clu = LOBNO[:, cluster_list]
+                    if hasattr(LO_BNO_clu, 'get'):
+                        LO_BNO_clu = LO_BNO_clu.get(blocking=True)
+                    else:
+                        LO_BNO_clu = numpy.asarray(LO_BNO_clu)
                     AOMO = numpy.dot(AOLO, LOMO)
                     AO_BNO_clu = numpy.dot(AOLO, LO_BNO_clu)
 
@@ -690,7 +694,7 @@ class high_level_processing:
                 file = lib.FileMp(os.path.join(t1t2_path, '_t2'), 'a')
                 del file['t2']
                 file.close()
-            
+
             self.PR.delet_obj('LOBNO')
 
         self.PR.recorder['stage'][1] = True

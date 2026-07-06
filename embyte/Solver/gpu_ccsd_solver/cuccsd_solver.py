@@ -400,10 +400,10 @@ class GPU_CCSDSolver():
             self.eris.mo_energy = _adjust_occ(self.eris.mo_energy, self.nocc, -self.madelung)
 
         self.eri_general = self.cc_fragment.with_df._cderi = None
-        
+
         lib.free_all_blocks()
         gc.collect()
-        
+
         self.cc_fragment.verbose = 4
         self.cc_fragment.conv_tol = 1e-8
         self.cc_fragment.conv_tol_normt = 1e-6
@@ -573,7 +573,7 @@ class GPU_CCSDSolver():
             self.t1.set(t1_h)
             cupy.cuda.get_current_stream().synchronize()
             t1_h = None
-        
+
         if self.t2.dev != 0:
             self.Logger.info(
                 't2 in CPU memory. Transport t2 from CPU to GPU!'
@@ -784,7 +784,7 @@ class GPU_CCSDSolver():
                     with self.t2[so] as arr_t2:
                         culib.contraction(
                             'kiac', arr_l2, 'kjbc', arr_t2, 'aijb', arr_pvOOv, beta=1.0)
-            
+
             self.moo = self.pool.new('moo', (no, no), 'f8', pin=0)
             self.mvv = self.pool.new('mvv', (nv, nv), 'f8', pin=0)
             culib.contraction(
@@ -803,7 +803,7 @@ class GPU_CCSDSolver():
                 'db',
                 self.mvv,
                 alpha=2.0)
-        
+
         arr_pvOOv = arr_l2 = arr_t2 = None
         lib.free_all_blocks()
         gc.collect()
@@ -831,7 +831,7 @@ class GPU_CCSDSolver():
         self.mab = self.pool.new('mab', (nv, nv), 'f8', pin=0)
         culib.contraction('kc', self.l1x, 'kb', self.t1, 'cb', self.mab)
         arr = None
-        
+
         lib.free_all_blocks()
         gc.collect()
 
@@ -878,7 +878,7 @@ class GPU_CCSDSolver():
                             arr_pvoOV,
                             beta=1.0,
                             alpha=-1.0)
-            
+
             arr_l2 = arr_t2 = None
             lib.free_all_blocks()
 
@@ -898,7 +898,7 @@ class GPU_CCSDSolver():
                 'db',
                 self.mvv,
                 beta=1.0)
-        
+
         arr_pvoOV = None
         lib.free_all_blocks()
 
@@ -962,7 +962,7 @@ class GPU_CCSDSolver():
                 gooov,
                 beta=1.0,
                 alpha=2.0)
-        
+
         arr_goooo = None
         lib.free_all_blocks()
 
@@ -1055,7 +1055,7 @@ class GPU_CCSDSolver():
                 gooL_tmp,
                 beta=1.0,
                 alpha=-1.0)
-        
+
         Lov = None
         lib.free_all_blocks()
 
@@ -1175,7 +1175,7 @@ class GPU_CCSDSolver():
                     'ijab',
                     arr_goovv,
                     beta=1.0)
-            
+
             arr_goovv = None
             lib.free_all_blocks()
 
@@ -1209,10 +1209,10 @@ class GPU_CCSDSolver():
                     arr_goovv,
                     beta=1.0,
                     alpha=-1.0)
-    
+
             arr_goovv = None
             lib.free_all_blocks()
-        
+
         tau = buffer_tau = None
         lib.free_all_blocks()
 
@@ -1241,7 +1241,7 @@ class GPU_CCSDSolver():
                 beta=1.0,
                 alpha=-1.0)
             e_ovov += cupy.dot(g_tmp.ravel(), Lov.ravel().T)
-        
+
         Lov = None
         lib.free_all_blocks()
 
@@ -1304,7 +1304,7 @@ class GPU_CCSDSolver():
         lib.free_all_blocks()
 
         free_size = lib.gpu_avail_bytes() / 8
-        slice_len = min(nL, int(free_size / ((no + nv) * max(nv, no))))
+        slice_len = max(1, min(nL, int(free_size / ((no + nv) * max(nv, no)))))
         slice_L = [slice(i[0], i[1]) for i in prange(0, nL, slice_len)]
         buffer_g_tmp = self.pool.empty((slice_len, no, max(nv, no)), dtype='f8')
         for sL in slice_L:
@@ -1314,7 +1314,7 @@ class GPU_CCSDSolver():
                 e_ovvo += cupy.dot(g_tmp.ravel(), Lov.ravel().T).item()
             Lov = None
             lib.free_all_blocks()
-            
+
             with self.eris.Lvv[sL] as Lvv:
                 g_tmp = culib.contraction(
                     'aijb', gvOOv, 'Lba', Lvv, 'Lij', buf=buffer_g_tmp)
@@ -1375,7 +1375,7 @@ class GPU_CCSDSolver():
 
 
         free_size = lib.gpu_avail_bytes() / 8
-        slice_len = min(nL, int(free_size / ((no + nv) * max(nv, no))))
+        slice_len = max(1, min(nL, int(free_size / ((no + nv) * max(nv, no)))))
         slice_L = [slice(i[0], i[1]) for i in prange(0, nL, slice_len)]
         buffer_g_tmp = self.pool.empty((slice_len, no, max(nv, no)), dtype='f8')
         for sL in slice_L:

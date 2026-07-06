@@ -431,15 +431,20 @@ def build_krmp2_cderi(
                 ),
             )
 
+        pair_buf_cols = (
+            int(pair_blksizes)
+            if isinstance(pair_blksizes, (int, np.integer))
+            else int(max(pair_blksizes))
+        )
         host_buffers = {
             kp: [
                 cupyx.empty_pinned(
-                    (naoaux_total_by_kpt[kp], int(max(pair_blksizes))),
+                    (naoaux_total_by_kpt[kp], pair_buf_cols),
                     dtype=np.complex128,
                     order="C",
                 ),
                 cupyx.empty_pinned(
-                    (naoaux_total_by_kpt[kp], int(max(pair_blksizes))),
+                    (naoaux_total_by_kpt[kp], pair_buf_cols),
                     dtype=np.complex128,
                     order="C",
                 ),

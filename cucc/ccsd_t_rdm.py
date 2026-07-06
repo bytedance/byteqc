@@ -77,7 +77,7 @@ div_d3_abc = cupy.ElementwiseKernel(
         int J = iabc % nocc;
         iabc /= nocc;
         int I = iabc % nocc;
-        
+
         iabc /= nocc;
         int A = a[iabc];
         int B = b[iabc];
@@ -95,7 +95,7 @@ div_d3_ijk = cupy.ElementwiseKernel(
         int B = temp % nvir;
         temp /= nvir;
         int A = temp % nvir;
-        
+
         size_t n_idx = temp / nvir;
         int I = indi[n_idx];
         int J = indj[n_idx];
@@ -114,7 +114,7 @@ sym_multiply = cupy.ElementwiseKernel(
     int B = temp % n;
     temp /= n;
     int A = temp % n;
-        
+
     size_t n_idx = temp / n;
     int I = indi[n_idx];
     int J = indj[n_idx];
@@ -291,12 +291,12 @@ take1010 = cupy.ElementwiseKernel(
     'T out', '''
     int d = i % extd;
     size_t temp = i / extd;
-    int b = temp % extb; 
-    size_t m = temp / extb;   
-    
+    int b = temp % extb;
+    size_t m = temp / extb;
+
     int a_target = inda[m];
     int c_target = indc[m];
-    
+
     size_t r_idx = ((((size_t)a_target * extb) + b) * extc + c_target) * extd + d;
     out = r[r_idx];
     ''', 'take1010')
@@ -322,22 +322,25 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
     goo[:] = 0.0
     gvv[:] = 0.0
 
-    if t2.dev == 0: # t2 can be stored in GPU
+    if t2.dev == 0:  # t2 can be stored in GPU
+
         def take010_t2(out, ind, t2, buf, isTrans=False):
             if isTrans:
                 take0010_t(nocc, nvir, ind, t2, out)
             else:
                 take010(nocc * nocc, nvir, nvir, ind, t2, out)
+
         def take011_t2(out, ind1, ind2, t2, buf):
             take011(nocc * nocc, nvir, nvir, ind1, ind2, t2, out)
-        
+
         def take110_t2(out, ind1, ind2, t2, buf):
             take110(nocc, nocc, nvir * nvir, ind1, ind2, t2, out)
-        
+
         def take010_t2v(out, ind, t2, buf):
             take010(nocc, nocc, nvir * nvir, ind, t2, out)
     else:
         # t2 can't be stored in GPU
+
         def take010_t2(out, ind, t2, buf, isTrans=False):
             blk = min(nocc * nocc, int(buf.bufsize / 8 / nvir**2))
             n = len(ind)
@@ -353,6 +356,7 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
                     take010_s(nocc * nocc, p0, p1, nvir, nvir, ind, t2p, out,
                               size=n * (p1 - p0) * nvir)
             buf.untag('t2')
+
         def take011_t2(out, ind1, ind2, t2, buf):
             n = len(ind1)
             t2 = t2.reshape(nocc**2, nvir, nvir)
@@ -364,13 +368,15 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
                 take011_s(nocc * nocc, p0, p1, nvir, nvir, ind1,
                           ind2, t2p, out, size=n * (p1 - p0))
             buf.untag('t2')
+
         def take110_t2(out, ind1, ind2, t2, buf):
             i_cpu = cupy.asnumpy(ind1)
             j_cpu = cupy.asnumpy(ind2)
-            ## TODO: using pre-memory allcation to speed up
-            # lib.empty((n, nvir, nvir), type=1) 
+            # TODO: using pre-memory allocation to speed up
+            # lib.empty((n, nvir, nvir), type=1)
             t2_sliced_cpu = t2[i_cpu, j_cpu, :, :]
             out[:] = cupy.asarray(t2_sliced_cpu)
+
         def take010_t2v(out, ind, t2, buf):
             ind_cpu = cupy.asnumpy(ind)
             t2_sliced_cpu = t2[:, ind_cpu, :, :]
@@ -379,11 +385,11 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
     memory = pool.free_memory
     print("Free memory before ccsd_t_rdm: ",memory)
     unit_occ = 3 * nocc * nocc * nocc + nmax * nocc * nvir + nmax * nocc + 3
-    if eris.ovvv.l2 is not None: # density fitting is turned on
+    if eris.ovvv.l2 is not None:  # density fitting is turned on
         naux = eris.ovvv.l1.shape[0]
         unit_occ += naux * nocc * 2
     blksize = min(nabc, int(memory / 8 / unit_occ))
-    # allocate memory for intermediate tensors 
+    # allocate memory for intermediate tensors
     buf = lib.ArrayBuffer(pool.empty((blksize * unit_occ + 10 * 1024), 'f8'))
     a = buf.empty((blksize), 'i4')
     b = buf.empty((blksize), 'i4')
@@ -391,16 +397,17 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
     bufw = buf.empty((blksize, nocc, nocc, nocc), 'f8')
     bufz = buf.empty((blksize, nocc, nocc, nocc), 'f8')
     bufleft = buf.left()
-    # p6 permutation for slicing (a,b,c) 
+    # p6 permutation for slicing (a,b,c)
     inds = numpy.asarray([[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1],[2, 1, 0]])
     modes = numpy.asarray(["nijk", "nikj", "njik", "nkij", "njki", "nkji"])
-    
+
     # evaluate goo by slicing (a,b,c)
-    for p0, p1 in list(prange(0, nabc, blksize)): # loop for all blks
+    for p0, p1 in list(prange(0, nabc, blksize)):  # loop for all blks
         n = p1 - p0
         gen_abc(p0, a[:n], b[:n], c[:n])
-        abc = [a[:n], b[:n], c[:n]] 
-        def add_w(abc):
+        abc = [a[:n], b[:n], c[:n]]
+
+        def add_w_abc(abc):
             w = None
             n = len(abc[0])
             tmpbuf = lib.ArrayBuffer(bufleft)
@@ -410,14 +417,14 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
             _modes = modes[perm]
 
             # w = lib.contraction('iafb',eris_ovvv,'kjcf',t2, 'ijkabc')
-            for i in range(6): # p6 permutation --> loop for all 6 modes
-                a, b, c = [abc[j] for j in _inds[i]] # a, b, c is the index ARRAY
+            for i in range(6):  # p6 permutation --> loop for all 6 modes
+                a, b, c = [abc[j] for j in _inds[i]]  # a, b, c is the index ARRAY
                 mode = _modes[i]
                 tmpbuf.loadtag()
 
                 # determine the slice of eris_ovvv
                 eri_ovvv = tmpbuf.empty((n, nocc, nvir), 'f8')
-                if ovvv.l2 is None: 
+                if ovvv.l2 is None:
                     take0110(nocc, nvir, nvir, nvir, a, b, ovvv, eri_ovvv)
                 else:
                     naux = ovvv.l1.shape[0]
@@ -443,15 +450,15 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
                                isTrans=True if i == 2 else False)
                     tmpbuf.tag('t2')
                 tmpbuf.loadtag('t2')
-            
+
                 # conduct contraction between two slices
                 if w is None:
                     w = lib.contraction('nif', eri_ovvv, inc, t2s, mode, buf=bufw)
                 else:
                     w = lib.contraction('nif', eri_ovvv, inc, t2s, mode, w, beta=1.0)
-        
+
             # w -= lib.contraction('iajm',eris_ovoo,'mkbc',t2, 'ijkabc')
-            for i in range(6): # p6 permutation --> loop for all 6 modes
+            for i in range(6):  # p6 permutation --> loop for all 6 modes
                 a, b, c = [abc[j] for j in inds[i]]
                 mode = modes[i]
                 tmpbuf.loadtag()
@@ -483,8 +490,9 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
                 lib.contraction(inda, eri_ovoo, 'nkm', t2ss, mode, w,
                                 beta=1.0, alpha=-1.0)
             return w
-        
-        def add_z(abc,w): # build tensor v, and then add it to w to obtain z
+
+        def add_z_abc(abc, w):
+            # build tensor v, and then add it to w to obtain z
             v = None
             tmpbuf = lib.ArrayBuffer(bufleft)
             tmpbuf.tag()
@@ -494,17 +502,17 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
             _modes = modes[perm]
 
             # v = lib.contraction('iajb',eris_ovov.conj(),'kc',t1, 'ijkabc')
-            for i in range(6): # p6 permutation --> loop for all 6 modes
-                a, b, c = [abc[j] for j in _inds[i]] 
+            for i in range(6):  # p6 permutation --> loop for all 6 modes
+                a, b, c = [abc[j] for j in _inds[i]]
                 mode = _modes[i]
                 tmpbuf.loadtag()
                 eri_ovov = tmpbuf.empty((n, nocc, nocc), 'f8')
                 t1s = tmpbuf.empty((n, nocc), 'f8')
 
                 # slice ovov
-                if ovov.l2 is None: # turn off density fitting
+                if ovov.l2 is None:  # turn off density fitting
                     take0101(nocc, nvir, nocc, nvir, a, b, ovov, eri_ovov)
-                else: # turn on density fitting
+                else:  # turn on density fitting
                     naux = ovov.l1.shape[0]
                     lov_a = tmpbuf.empty((n, naux, nocc), 'f8')
                     lov_b = tmpbuf.empty((n, naux, nocc), 'f8')
@@ -522,21 +530,21 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
                     lib.contraction('nij',eri_ovov,'nk',t1s,mode,v,beta=1.0)
 
             # v += lib.contraction('ck',eris.fock[nocc:,:nocc],'ijab',t2, 'ijkabc')
-            for i in range(6): # p6 permutation --> loop for all 6 modes
-                a, b, c = [abc[j] for j in _inds[i]] 
+            for i in range(6):  # p6 permutation --> loop for all 6 modes
+                a, b, c = [abc[j] for j in _inds[i]]
                 mode = _modes[i]
                 tmpbuf.loadtag()
                 fs = tmpbuf.empty((n, nocc), 'f8')
                 t2s = tmpbuf.empty((n, nocc, nocc), 'f8')
-                take01(nocc,nvir,c,fov,fs) # slice fock, (kc) -> (nk)
-                take011_t2(t2s,a,b,t2,tmpbuf) # slice t2, (ijab) -> (nij)
-                lib.contraction('nk',fs,'nij',t2s,mode,v,beta=1.0) # contraction
+                take01(nocc,nvir,c,fov,fs)  # slice fock, (kc) -> (nk)
+                take011_t2(t2s,a,b,t2,tmpbuf)  # slice t2, (ijab) -> (nij)
+                lib.contraction('nk',fs,'nij',t2s,mode,v,beta=1.0)  # contraction
 
             # v(z) = 0.5 * v + w, modified in-place.
-            lib.elementwise_binary('nijk', w, 'nijk', v, alpha=1.0, gamma=0.5) 
+            lib.elementwise_binary('nijk', w, 'nijk', v, alpha=1.0, gamma=0.5)
             return v
-        
-        def r3(input, output):
+
+        def r3_abc(input, output):
             '''
             for Restricted-CCSD only
             Original 6-D expression:
@@ -555,18 +563,18 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
             lib.elementwise_binary('nikj', input, 'nijk', output, alpha=-2.0, gamma=1.0)
             lib.elementwise_binary('njik', input, 'nijk', output, alpha=-2.0, gamma=1.0)
             return output
-        
-        w = add_w(abc)
-        z = add_z(abc,w) 
+
+        w = add_w_abc(abc)
+        z = add_z_abc(abc, w)
         tmpbuf = lib.ArrayBuffer(bufleft)
         r = tmpbuf.empty((n, nocc, nocc, nocc), 'f8')
         r[:] = w
-        r3(w,r) 
+        r3_abc(w,r)
         div_d3_abc(nocc, *abc, e_occ, e_vir, z)
         div_d3_abc(nocc, *abc, e_occ, e_vir, r)
         sym_multiply(nocc, *abc, r)
         lib.contraction('nikl',z,'njkl',r,'ij',goo,beta=1.0)
-        lib.contraction('nkil',z,'nkjl',r,'ij',goo,beta=1.0) 
+        lib.contraction('nkil',z,'nkjl',r,'ij',goo,beta=1.0)
         lib.contraction('nkli',z,'nklj',r,'ij',goo,beta=1.0)
 
         # lib.contraction('ijab',t2.conj(),'ijkabc',r,'ck',dvo,alpha=0.5,beta=1.0)
@@ -588,11 +596,11 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
     nijk = nocc * (nocc + 1) * (nocc + 2) // 6
     memory = pool.free_memory
     unit_vir = 3 * nvir * nvir * nvir + nmax * nvir * nvir + nmax * nvir + 3
-    if eris.ovvv.l2 is not None: # density fitting is turned on
+    if eris.ovvv.l2 is not None:  # density fitting is turned on
         naux = eris.ovvv.l1.shape[0]
         unit_vir += naux * nvir * nvir * 2
     blksize = min(nijk, int(memory / 8 / unit_vir))
-    # allocate memory for intermediate tensors 
+    # allocate memory for intermediate tensors
     buf = lib.ArrayBuffer(pool.empty((blksize * unit_vir + 10 * 1024), 'f8'))
     i = buf.empty((blksize), 'i4')
     j = buf.empty((blksize), 'i4')
@@ -605,11 +613,12 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
     modes = numpy.asarray(["nabc", "nacb", "nbac", "ncab", "nbca", "ncba"])
 
     # evaluate gvv by slicing (i,j,k)
-    for p0, p1 in list(prange(0, nijk, blksize)): # loop for all blks
+    for p0, p1 in list(prange(0, nijk, blksize)):  # loop for all blks
         n = p1 - p0
         gen_abc(p0, i[:n], j[:n], k[:n])
-        ijk = [i[:n], j[:n], k[:n]] 
-        def add_w(ijk):
+        ijk = [i[:n], j[:n], k[:n]]
+
+        def add_w_ijk(ijk):
             w = None
             n = len(ijk[0])
             perm = [3, 5, 1, 4, 0, 2]
@@ -623,15 +632,14 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
             tmpbuf.tag()
 
             # w = lib.contraction('iafb',eris_ovvv,'kjcf',t2, 'ijkabc')
-            for idx in range(6): # p6 permutation --> loop for all 6 modes
-                i,j,k = [ijk[_idx] for _idx in _inds[idx]] 
+            for idx in range(6):  # p6 permutation --> loop for all 6 modes
+                i,j,k = [ijk[_idx] for _idx in _inds[idx]]
                 mode = _modes[idx]
                 tmpbuf.loadtag()
                 # determine the slice of eris_ovvv
-                # ##### TODO:
-                ## reordering reading order of ovvv!
+                # TODO: reorder reading order of ovvv.
                 eri_ovvv = tmpbuf.empty((n, nvir, nvir, nvir), 'f8')
-                if ovvv.l2 is None: 
+                if ovvv.l2 is None:
                     take10(nvir * nvir * nvir, i, ovvv, eri_ovvv)
                 else:
                     naux = ovvv.l1.shape[0]
@@ -639,28 +647,27 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
                     take010(naux, nocc, nvir, i, ovvv.l1, lov)
                     lib.contraction('nla', lov, 'lbc', lvv, 'nabc', eri_ovvv)
                 # determine the slice of t2
-                # ##### TODO:
-                ## IMPLEMENT sliced version of take_110_t2
+                # TODO: implement sliced version of take_110_t2.
                 t2s = tmpbuf.empty((n, nvir, nvir), 'f8')
                 take110_t2(t2s,k,j,t2,tmpbuf)
-                
+
                 # contraction
                 if w is None:
                     w = lib.contraction('nabf', eri_ovvv, 'ncf', t2s, mode, buf=bufw)
                 else:
                     w = lib.contraction('nabf', eri_ovvv, 'ncf', t2s, mode, w, beta=1.0)
-            
+
             # w -= lib.contraction('iajm',eris_ovoo,'mkbc',t2, 'ijkabc')
-            for idx in range(6): # p6 permutation --> loop for all 6 modes
-                i,j,k = [ijk[_idx] for _idx in _inds[idx]] 
+            for idx in range(6):  # p6 permutation --> loop for all 6 modes
+                i,j,k = [ijk[_idx] for _idx in _inds[idx]]
                 mode = _modes[idx]
                 tmpbuf.loadtag()
 
-                # determine the slice of eris_ovoo, ### add density fitting for ovoo!!!
+                # determine the slice of eris_ovoo, add density fitting for ovoo
                 eri_ovoo = tmpbuf.empty((n, nvir, nocc), 'f8')
                 if ovoo.l2 is None:
                     take1010(nocc,nvir,nocc,nocc,i,j,ovoo,eri_ovoo)
-                else: # density fitting is turned on
+                else:  # density fitting is turned on
                     naux = ovoo.l1.shape[0]
                     lov = tmpbuf.empty((n, naux, nvir), 'f8')
                     lom = tmpbuf.empty((n, naux, nocc), 'f8')
@@ -669,18 +676,17 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
                     lib.contraction('nla',lov,'nlm',lom,'nam',eri_ovoo)
 
                 # determine the slice of t2
-                # ##### TODO:
-                ## 1. IMPLEMENT sliced version of take_110_t2
-                ## 2. optimize t2 reading order 
+                # TODO: implement sliced version of take_110_t2.
+                # TODO: optimize t2 reading order.
                 t2ss = tmpbuf.empty((n,nocc,nvir,nvir), 'f8')
                 take010_t2v(t2ss,k,t2,tmpbuf)
 
                 # contraction
                 w = lib.contraction('nam', eri_ovoo, 'nmbc', t2ss, mode, w, beta=1.0, alpha=-1.0)
-            
+
             return w
-        
-        def add_z(ijk,w):
+
+        def add_z_ijk(ijk, w):
             v = None
             tmpbuf = lib.ArrayBuffer(bufleft)
             tmpbuf.tag()
@@ -690,23 +696,23 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
             _modes = modes[perm]
 
             # v = lib.contraction('iajb',eris_ovov.conj(),'kc',t1, 'ijkabc')
-            for idx in range(6): # p6 permutation --> loop for all 6 modes
-                i, j, k = [ijk[_idx] for _idx in _inds[idx]] 
+            for idx in range(6):  # p6 permutation --> loop for all 6 modes
+                i, j, k = [ijk[_idx] for _idx in _inds[idx]]
                 mode = _modes[idx]
                 tmpbuf.loadtag()
                 eri_ovov = tmpbuf.empty((n, nvir, nvir), 'f8')
                 t1s = tmpbuf.empty((n, nvir), 'f8')
                 # slice ovov
-                if ovov.l2 is None: # turn off density fitting
+                if ovov.l2 is None:  # turn off density fitting
                     take1010(nocc,nvir,nocc,nvir,i,j,ovov,eri_ovov)
-                else: # turn on density fitting
+                else:  # turn on density fitting
                     naux = ovov.l1.shape[0]
                     lov_a = tmpbuf.empty((n, naux, nvir), 'f8')
                     lov_b = tmpbuf.empty((n, naux, nvir), 'f8')
                     take010(naux, nocc, nvir, i, ovov.l1, lov_a)
                     take010(naux, nocc, nvir, j, ovov.l1, lov_b)
                     lib.contraction('nla',lov_a,'nlb',lov_b,'nab',eri_ovov)
-                
+
                 # slice t1
                 take10(nvir,k,t1,t1s)
                 # contraction
@@ -714,23 +720,23 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
                     v = lib.contraction('nab',eri_ovov, 'nc',t1s,mode,buf=bufz)
                 else:
                     lib.contraction('nab',eri_ovov,'nc',t1s,mode,v,beta=1.0)
-            
+
             # v += lib.contraction('ck',eris.fock[nocc:,:nocc],'ijab',t2, 'ijkabc')
-            for idx in range(6): # p6 permutation --> loop for all 6 modes
-                i, j, k = [ijk[_idx] for _idx in _inds[idx]] 
+            for idx in range(6):  # p6 permutation --> loop for all 6 modes
+                i, j, k = [ijk[_idx] for _idx in _inds[idx]]
                 mode = _modes[idx]
                 tmpbuf.loadtag()
                 fs = tmpbuf.empty((n, nvir), 'f8')
                 t2s = tmpbuf.empty((n, nvir, nvir), 'f8')
-                take10(nvir,k,fov,fs) # slice fock, (kc) -> (nc)
-                take110_t2(t2s,i,j,t2,tmpbuf) # slice t2, (ijab) -> (nab)
-                lib.contraction('nc',fs,'nab',t2s,mode,v,beta=1.0) # contraction
+                take10(nvir,k,fov,fs)  # slice fock, (kc) -> (nc)
+                take110_t2(t2s,i,j,t2,tmpbuf)  # slice t2, (ijab) -> (nab)
+                lib.contraction('nc',fs,'nab',t2s,mode,v,beta=1.0)  # contraction
 
             # v(z) = 0.5 * v + w, modified in-place.
-            lib.elementwise_binary('nabc', w, 'nabc', v, alpha=1.0, gamma=0.5) 
+            lib.elementwise_binary('nabc', w, 'nabc', v, alpha=1.0, gamma=0.5)
             return v
 
-        def r3(input, output):
+        def r3_ijk(input, output):
             '''
             for Restricted-CCSD only
             Original 6-D expression:
@@ -749,21 +755,21 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
             lib.elementwise_binary('nacb', input, 'nabc', output, alpha=-2.0, gamma=1.0)
             lib.elementwise_binary('nbac', input, 'nabc', output, alpha=-2.0, gamma=1.0)
             return output
-        
-        w = add_w(ijk) 
-        z = add_z(ijk,w) 
+
+        w = add_w_ijk(ijk)
+        z = add_z_ijk(ijk, w)
         tmpbuf = lib.ArrayBuffer(bufleft)
         r = tmpbuf.empty((n, nvir, nvir, nvir), 'f8')
         r[:] = w
-        r3(w,r)
+        r3_ijk(w,r)
         div_d3_ijk(nvir, *ijk, e_occ, e_vir, z)
         div_d3_ijk(nvir, *ijk, e_occ, e_vir, r)
         sym_multiply(nvir, *ijk, z)
         lib.contraction('nacd',z,'nbcd',r,'ab',gvv,beta=1.0)
-        lib.contraction('ncad',z,'ncbd',r,'ab',gvv,beta=1.0) 
+        lib.contraction('ncad',z,'ncbd',r,'ab',gvv,beta=1.0)
         lib.contraction('ncda',z,'ncdb',r,'ab',gvv,beta=1.0)
 
-    # adding to doo and dvv 
+    # adding to doo and dvv
     goo_diag = cupy.diag(goo)
     gvv_diag = cupy.diag(gvv)
     doo[numpy.diag_indices(nocc)] -= 0.5 * goo_diag
@@ -776,4 +782,3 @@ def _gamma1_intermediates(mycc, t1, t2, l1, l2, eris=None):
 def make_rdm1(mycc, t1, t2, l1, l2, eris=None, ao_repr=False):
     d1 = _gamma1_intermediates(mycc, t1, t2, l1, l2, eris)
     return ccsd_rdm._make_rdm1(mycc, d1, True, ao_repr=ao_repr)
-    

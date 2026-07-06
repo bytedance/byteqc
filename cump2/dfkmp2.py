@@ -108,7 +108,7 @@ def kernel(mol, rhf, auxbasis=None, verbose=None,
             mo_energy[:nocc] -= ewald_correct
         elif remove_ewald:
             mo_energy[:nocc] += ewald_correct
-    
+
 
     vslices = [slice(i[0], i[1]) for i in prange(0, nvir, vblk)]
     e_corr, rdm1, _ = mp2_get_corr(

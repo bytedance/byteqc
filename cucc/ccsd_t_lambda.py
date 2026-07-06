@@ -86,7 +86,7 @@ div_d3 = cupy.ElementwiseKernel(
         int J = iabc % nocc;
         iabc /= nocc;
         int I = iabc % nocc;
-        
+
         iabc /= nocc;
         int A = a[iabc];
         int B = b[iabc];
@@ -105,7 +105,7 @@ sym_multiply = cupy.ElementwiseKernel(
     int B = temp % n;
     temp /= n;
     int A = temp % n;
-        
+
     size_t n_idx = temp / n;
     int I = indi[n_idx];
     int J = indj[n_idx];
@@ -128,7 +128,7 @@ sym_divide = cupy.ElementwiseKernel(
     int B = temp % n;
     temp /= n;
     int A = temp % n;
-        
+
     size_t n_idx = temp / n;
     int I = indi[n_idx];
     int J = indj[n_idx];
@@ -305,12 +305,12 @@ take1010 = cupy.ElementwiseKernel(
     'T out', '''
     int d = i % extd;
     size_t temp = i / extd;
-    int b = temp % extb; 
-    size_t m = temp / extb;   
-    
+    int b = temp % extb;
+    size_t m = temp / extb;
+
     int a_target = inda[m];
     int c_target = indc[m];
-    
+
     size_t r_idx = ((((size_t)a_target * extb) + b) * extc + c_target) * extd + d;
     out = r[r_idx];
     ''', 'take1010')
@@ -334,9 +334,9 @@ def make_intermediates(mycc, t1, t2, eris):
     fov = cupy.asarray((eris.fock)[nocc:,:nocc])
     mo_e = pool.asarray(eris.mo_energy)
     e_occ, e_vir = mo_e[:nocc], mo_e[nocc:]
-     
+
     def take_ovov(eri_ovov,ind1,ind2,lov_1,lov_2):
-        if ovov.l2 is None: # turn off density fitting
+        if ovov.l2 is None:  # turn off density fitting
             take0101(nocc, nvir, nocc, nvir, ind1, ind2, ovov, eri_ovov)
         else:
             naux = ovov.l1.shape[0]
@@ -344,32 +344,33 @@ def make_intermediates(mycc, t1, t2, eris):
             take01(naux * nocc, nvir, ind2, ovov.l1, lov_2)
             lib.contraction('nli',lov_1,'nlj',lov_2,'nij',eri_ovov)
 
-    def take_ovvv(eri_ovvv,ind1,ind2,lov,lvv): # for ovvv, take0110 = take0101 due to the symmetry (ia|bc) = (ia|cb)
-        if ovvv.l2 is None: # turn off density fitting
+    # For ovvv, take0110 = take0101 due to the symmetry (ia|bc) = (ia|cb).
+    def take_ovvv(eri_ovvv, ind1, ind2, lov, lvv):
+        if ovvv.l2 is None:  # turn off density fitting
             take0110(nocc, nvir, nvir, nvir, ind1, ind2, ovvv, eri_ovvv)
-        else: # ovvv density fitting is wrong!
+        else:  # ovvv density fitting is wrong!
             naux = ovvv.l1.shape[0]
             take01(naux * nocc, nvir, ind1, ovvv.l1, lov)
             take010(naux, nvir, nvir, ind2, ovvv.l2, lvv)
             lib.contraction('nlo', lov, 'nlv', lvv, 'nov', eri_ovvv)
-    
+
     def take_ovoo(eri_ovoo,ind1,lov,lpq):
-        if ovoo.l2 is None: # turn off density fitting
+        if ovoo.l2 is None:  # turn off density fitting
             take010(nocc,nvir,nocc*nocc,ind1,ovoo,eri_ovoo)
         else:
             naux = ovoo.l1.shape[0]
             take01(naux * nocc, nvir, ind1, ovoo.l1, lov)
             lpq = ovoo.l2.ascupy(buf=lpq)
             lib.contraction('nlo', lov, 'lpq', lpq, 'nopq', eri_ovoo)
-    
-    if t2.dev == 0: # t2 can be stored in GPU
+
+    if t2.dev == 0:  # t2 can be stored in GPU
         def take010_t2(out, ind, t2, buf, isTrans=False):
             if isTrans:
                 take0010_t(nocc, nvir, ind, t2, out)
             else:
                 take010(nocc * nocc, nvir, nvir, ind, t2, out)
         def take011_t2(out, ind1, ind2, t2, buf):
-            take011(nocc * nocc, nvir, nvir, ind1, ind2, t2, out)  
+            take011(nocc * nocc, nvir, nvir, ind1, ind2, t2, out)
     else:
         # t2 can't be stored in GPU
         def take010_t2(out, ind, t2, buf, isTrans=False):
@@ -398,17 +399,17 @@ def make_intermediates(mycc, t1, t2, eris):
                 take011_s(nocc * nocc, p0, p1, nvir, nvir, ind1,
                           ind2, t2p, out, size=n * (p1 - p0))
             buf.untag('t2')
-    
-    pool.status['l1_t'] = 0 # store in gpu
-    pool.status['l2_t'] = 1 # store in cpu
-    pool.status['j'] = 1 # store in cpu
-    pool.status['k'] = 1 # store in cpu
+
+    pool.status['l1_t'] = 0  # store in gpu
+    pool.status['l2_t'] = 1  # store in cpu
+    pool.status['j'] = 1  # store in cpu
+    pool.status['k'] = 1  # store in cpu
     imds.l1_t = pool.new('l1_t', (nocc,nvir), 'f8')
     imds.l2_t = pool.new('l2_t', (nocc,nocc,nvir,nvir), 'f8')
     joovv = pool.new('j', (nocc,nocc,nvir,nvir), 'f8')
     koovv = pool.new('k', (nocc,nocc,nvir,nvir), 'f8')
     imds.l1_t[:] = 0.0
-    imds.l2_t[:] = 0.0  
+    imds.l2_t[:] = 0.0
     joovv[:] = 0.0
     koovv[:] = 0.0
 
@@ -416,14 +417,14 @@ def make_intermediates(mycc, t1, t2, eris):
     print("Free memory before ccsd_t_lambda: ", memory)
     print(f"nocc = {nocc}, nvir = {nvir}")
     unit_occ = 3 * nocc * nocc * nocc + nocc * nocc * nvir + nocc * (nocc + nvir) + 3
-    if eris.ovvv.l2 is not None: # density fitting is turned on
+    if eris.ovvv.l2 is not None:  # density fitting is turned on
         naux = eris.ovvv.l1.shape[0]
         unit_occ += naux * nocc * 2
         unit_occ += naux * nocc * nocc + naux * nvir
 
     blksize = min(nabc, int(memory / 8 / unit_occ))
 
-    # allocate memory for intermediate tensors 
+    # allocate memory for intermediate tensors
     buf = lib.ArrayBuffer(pool.empty((blksize * unit_occ + 10 * 1024), 'f8'))
     a = buf.empty((blksize), 'i4')
     b = buf.empty((blksize), 'i4')
@@ -431,16 +432,16 @@ def make_intermediates(mycc, t1, t2, eris):
     buf1 = buf.empty((blksize, nocc, nocc, nocc), 'f8')
     buf2 = buf.empty((blksize, nocc, nocc, nocc), 'f8')
     bufleft = buf.left()
-    cpu_buf1 = lib.empty((blksize, nocc, nocc, nvir), 'f8',type=1) # pinned memory
-    cpu_buf2 = lib.empty((blksize, nocc, nocc), 'f8',type=1) # pinned memory
-    cpu_buf1_asy = lib.empty((blksize, nocc, nocc, nvir), 'f8',type=1) # pinned memory
-    cpu_buf2_asy = lib.empty((blksize, nocc, nocc), 'f8',type=1) # pinned memory
+    cpu_buf1 = lib.empty((blksize, nocc, nocc, nvir), 'f8',type=1)  # pinned memory
+    cpu_buf2 = lib.empty((blksize, nocc, nocc), 'f8',type=1)  # pinned memory
+    cpu_buf1_asy = lib.empty((blksize, nocc, nocc, nvir), 'f8',type=1)  # pinned memory
+    cpu_buf2_asy = lib.empty((blksize, nocc, nocc), 'f8',type=1)  # pinned memory
     # p6 permutation for slicing (a,b,c)
     inds = numpy.asarray([[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1],[2, 1, 0]])
     modes = numpy.asarray(["nijk", "nikj", "njik", "nkij", "njki", "nkji"])
 
     # evaluate lambda vectors by slicing (a,b,c)
-    for p0, p1 in list(prange(0, nabc, blksize)): # loop for all blks
+    for p0, p1 in list(prange(0, nabc, blksize)):  # loop for all blks
         n = p1 - p0
         gen_abc(p0, a[:n], b[:n], c[:n])
         abc = [a[:n], b[:n], c[:n]]
@@ -453,13 +454,13 @@ def make_intermediates(mycc, t1, t2, eris):
             _inds = inds[perm]
             _modes = modes[perm]
             # w = lib.contraction('iafb',eris_ovvv,'kjcf',t2, 'ijkabc')
-            for i in range(6): # p6 permutation --> loop for all 6 modes
-                a, b, c = [abc[j] for j in _inds[i]] 
+            for i in range(6):  # p6 permutation --> loop for all 6 modes
+                a, b, c = [abc[j] for j in _inds[i]]
                 mode = _modes[i]
                 tmpbuf.loadtag()
                 eri_ovvv = tmpbuf.empty((n, nocc, nvir), 'f8')
                 lov = lvv = None
-                if ovvv.l2 is not None: # turn on density fitting
+                if ovvv.l2 is not None:  # turn on density fitting
                     naux = ovvv.l1.shape[0]
                     lov = tmpbuf.empty((n, naux, nocc), 'f8')
                     lvv = tmpbuf.empty((n, naux, nvir), 'f8')
@@ -478,9 +479,9 @@ def make_intermediates(mycc, t1, t2, eris):
                     w = lib.contraction('nif', eri_ovvv, inc, t2s, mode, buf=_bufw)
                 else:
                     w = lib.contraction('nif', eri_ovvv, inc, t2s, mode, w, beta=1.0)
-        
+
             # w -= lib.contraction('iajm',eris_ovoo,'mkbc',t2, 'ijkabc')
-            for i in range(6): # p6 permutation --> loop for all 6 modes
+            for i in range(6):  # p6 permutation --> loop for all 6 modes
                 a, b, c = [abc[j] for j in inds[i]]
                 mode = modes[i]
                 tmpbuf.loadtag()
@@ -505,7 +506,7 @@ def make_intermediates(mycc, t1, t2, eris):
                 lib.contraction(inda, eri_ovoo, 'nkm', t2ss, mode, w,
                                 beta=1.0, alpha=-1.0)
             return w
-        
+
         def r3(input, output):
             '''
             for Restricted-CCSD only
@@ -525,20 +526,20 @@ def make_intermediates(mycc, t1, t2, eris):
             lib.elementwise_binary('nikj', input, 'nijk', output, alpha=-2.0, gamma=1.0)
             lib.elementwise_binary('njik', input, 'nijk', output, alpha=-2.0, gamma=1.0)
             return output
-        
-        bufw = buf1[:n] 
+
+        bufw = buf1[:n]
         r = buf2[:n]
         w = add_w(abc,bufw)
         div_d3(nocc, *abc, e_occ, e_vir, w)
         r[:] = w
-        r3(w,r) 
+        r3(w,r)
         tmpbuf = lib.ArrayBuffer(bufleft)
 
         # calculate l1_t via r
         tmpbuf.tag()
         tmp_l1_t = tmpbuf.empty((n, nocc), 'f8')
         eri_ovov = tmpbuf.empty((n, nocc, nocc), 'f8')
-        
+
         # l1_t = numpy.einsum('jbkc,ijkabc->ia', eris_ovov, r6(w)) / eia * .5
         lov_1 = lov_2 = None
         if ovov.l2 is not None:
@@ -570,13 +571,15 @@ def make_intermediates(mycc, t1, t2, eris):
             # Combining this transformation with r6 operation, leads to the
             # transformation code below
             # return m * 2 - m.transpose(0,1,2,5,4,3) - m.transpose(0,1,2,3,5,4)
-            ### Important things in our tensor slicing code:
-            # as_r6 will break the 6-fold permutation symmetry, 
+            # Important things in our tensor slicing code:
+            # as_r6 will break the 6-fold permutation symmetry,
             # so we have to manually apply the upper-triangle symmetry.
             lib.elementwise_binary(mode0, input, 'nijk', output, alpha=2.0)
-            lib.elementwise_trinary(mode1, input, mode2, input, 'nijk', output, gamma=1.0, alpha=-1.0, beta=-1.0)
+            lib.elementwise_trinary(
+                mode1, input, mode2, input, 'nijk', output,
+                gamma=1.0, alpha=-1.0, beta=-1.0)
             return output
-        
+
         @numba.njit(parallel=True, fastmath=True, nogil=True)
         def fast_scatter_add_j1(target, idx_c, update):
             n, nocc, _, nvir = update.shape
@@ -595,47 +598,53 @@ def make_intermediates(mycc, t1, t2, eris):
                     c1 = idx_c1[k]
                     c2 = idx_c2[k]
                     for jj in range(nocc):
-                        target[i, jj, c1, c2] += update[k, i, jj]   
-        
-        # In the next section, r = as_r6(w), is different from r tensor in the l1_t equation.  
+                        target[i, jj, c1, c2] += update[k, i, jj]
+
+        # In the next section, r = as_r6(w), is different from r tensor in the l1_t equation.
         def add_k(abc,k,cpu_bufk):
             a,b,c = abc[0],abc[1],abc[2]
             cpu_a, cpu_b, cpu_c = cupy.asnumpy(a), cupy.asnumpy(b), cupy.asnumpy(c)
             tmpbuf = lib.ArrayBuffer(bufleft)
             bufk = tmpbuf.empty((n, nocc, nocc), 'f8')
             fs = tmpbuf.empty((n, nocc), 'f8')
-            
+
             take01(nocc,nvir,c,fov,fs)
-            as_r6(w,r,'nijk','nkji','nikj') # (v1,v2,v3) = (A,B,C); r = 2W(A,B,C) - W(C,B,A) - W(A,C,B)
+            # (v1,v2,v3) = (A,B,C)
+            as_r6(w, r, 'nijk', 'nkji', 'nikj')
             lib.contraction('nk',fs,'nijk',r,'nij',bufk)
             bufk.get(out=cpu_bufk,blocking=True)
             fast_scatter_add_k(k, cpu_a, cpu_b, cpu_bufk)
-            as_r6(w,r,'njik','njki','nkij') # (v1,v2,v3) = (B,A,C), r = 2W(B,A,C) - W(C,A,B) - W(B,C,A)
+            # (v1,v2,v3) = (B,A,C)
+            as_r6(w, r, 'njik', 'njki', 'nkij')
             lib.contraction('nk',fs,'nijk',r,'nij',bufk)
             bufk.get(out=cpu_bufk,blocking=True)
             fast_scatter_add_k(k, cpu_b, cpu_a, cpu_bufk)
 
             take01(nocc,nvir,b,fov,fs)
-            as_r6(w,r,'nikj','nkij','nijk') # (v1,v2,v3) = (A,C,B), r = 2W(A,C,B) - W(B,C,A) - W(A,B,C)
+            # (v1,v2,v3) = (A,C,B)
+            as_r6(w, r, 'nikj', 'nkij', 'nijk')
             lib.contraction('nk',fs,'nijk',r,'nij',bufk)
             bufk.get(out=cpu_bufk,blocking=True)
             fast_scatter_add_k(k, cpu_a, cpu_c, cpu_bufk)
-            as_r6(w,r,'njki','njik','nkji') # (v1,v2,v3) = (C,A,B), r = 2W(C,A,B) - W(B,A,C) - W(C,B,A)
+            # (v1,v2,v3) = (C,A,B)
+            as_r6(w, r, 'njki', 'njik', 'nkji')
             lib.contraction('nk',fs,'nijk',r,'nij',bufk)
             bufk.get(out=cpu_bufk,blocking=True)
             fast_scatter_add_k(k, cpu_c, cpu_a, cpu_bufk)
-            
+
             take01(nocc,nvir,a,fov,fs)
-            as_r6(w,r,'nkij','nikj','njik') # (v1,v2,v3) = (B,C,A), r = 2W(B,C,A) - W(A,C,B) - W(B,A,C)
+            # (v1,v2,v3) = (B,C,A)
+            as_r6(w, r, 'nkij', 'nikj', 'njik')
             lib.contraction('nk',fs,'nijk',r,'nij',bufk)
             bufk.get(out=cpu_bufk,blocking=True)
             fast_scatter_add_k(k, cpu_b, cpu_c, cpu_bufk)
-            as_r6(w,r,'nkji','nijk','njki') # (v1,v2,v3) = (C,B,A), r = 2W(C,B,A) - W(A,B,C) - W(C,A,B))
+            # (v1,v2,v3) = (C,B,A)
+            as_r6(w, r, 'nkji', 'nijk', 'njki')
             lib.contraction('nk',fs,'nijk',r,'nij',bufk)
             bufk.get(out=cpu_bufk,blocking=True)
             fast_scatter_add_k(k, cpu_c, cpu_b, cpu_bufk)
             return
-        
+
         def add_z(abc,_bufv):
             # build v using _bufv, then add w to it to get z.
             v = None
@@ -645,8 +654,8 @@ def make_intermediates(mycc, t1, t2, eris):
             _inds = inds[perm]
             _modes = modes[perm]
             # v = lib.contraction('iajb',eris_ovov.conj(),'kc',t1, 'ijkabc')
-            for i in range(6): # p6 permutation --> loop for all 6 modes
-                a, b, c = [abc[j] for j in _inds[i]] 
+            for i in range(6):  # p6 permutation --> loop for all 6 modes
+                a, b, c = [abc[j] for j in _inds[i]]
                 mode = _modes[i]
                 tmpbuf.loadtag('z')
                 eri_ovov = tmpbuf.empty((n, nocc, nocc), 'f8')
@@ -666,24 +675,24 @@ def make_intermediates(mycc, t1, t2, eris):
                     lib.contraction('nij',eri_ovov,'nk',t1s,mode,v,beta=1.0)
 
             # v += lib.contraction('ck',eris.fock[nocc:,:nocc],'ijab',t2, 'ijkabc')
-            for i in range(6): # p6 permutation --> loop for all 6 modes
-                a, b, c = [abc[j] for j in _inds[i]] 
+            for i in range(6):  # p6 permutation --> loop for all 6 modes
+                a, b, c = [abc[j] for j in _inds[i]]
                 mode = _modes[i]
                 tmpbuf.loadtag('z')
                 fs = tmpbuf.empty((n, nocc), 'f8')
                 t2s = tmpbuf.empty((n, nocc, nocc), 'f8')
-                take01(nocc,nvir,c,fov,fs) # slice fock, (kc) -> (nk)
-                take011_t2(t2s,a,b,t2,tmpbuf) # slice t2, (ijab) -> (nij)
-                lib.contraction('nk',fs,'nij',t2s,mode,v,beta=1.0) # contraction
-            
+                take01(nocc,nvir,c,fov,fs)  # slice fock, (kc) -> (nk)
+                take011_t2(t2s,a,b,t2,tmpbuf)  # slice t2, (ijab) -> (nij)
+                lib.contraction('nk',fs,'nij',t2s,mode,v,beta=1.0)  # contraction
+
             div_d3(nocc, *abc, e_occ, e_vir, v)
             sym_divide(nocc,*abc,v)
-            lib.elementwise_binary('nijk', w, 'nijk', v, alpha=2.0, gamma=0.5) # z = 2w + 0.5v
+            lib.elementwise_binary('nijk', w, 'nijk', v, alpha=2.0, gamma=0.5)  # z = 2w + 0.5v
             tmpbuf.untag('z')
             return v
-        
-        sym_divide(nocc,*abc,w) 
-        add_k(abc,koovv,cpu_buf2[:n]) # Buffer allocation now: buf1 -> w; buf2 -> r
+
+        sym_divide(nocc,*abc,w)
+        add_k(abc,koovv,cpu_buf2[:n])  # Buffer allocation now: buf1 -> w; buf2 -> r
         del r
         bufz = buf2[:n]
         z = add_z(abc,bufz)   # Buffer allocation now: buf1 -> w; buf2 -> z
@@ -707,23 +716,24 @@ def make_intermediates(mycc, t1, t2, eris):
                 naux = ovoo.l1.shape[0]
                 lov_ovoo = tmpbuf.empty((n, naux, nocc), 'f8')
                 lpq = tmpbuf.empty((naux, nocc, nocc),'f8')
-            if ovvv.l2 is not None: # turn on density fitting
+            if ovvv.l2 is not None:  # turn on density fitting
                 naux = ovvv.l1.shape[0]
                 lov = tmpbuf.empty((n, naux, nocc), 'f8')
                 lvv = tmpbuf.empty((n, naux, nvir), 'f8')
-            
+
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            task_tracker = {} 
+            task_tracker = {}
             def dispatch_j1(cpu_buf, idx_c):
                 if id(cpu_buf) in task_tracker:
-                   task_tracker[id(cpu_buf)].result() 
+                    task_tracker[id(cpu_buf)].result()
                 bufj1.get(out=cpu_buf, blocking=True)
                 task_tracker[id(cpu_buf)] = executor.submit(fast_scatter_add_j1, j, idx_c, cpu_buf)
             def dispatch_k(cpu_buf, idx_c1, idx_c2):
                 if id(cpu_buf) in task_tracker:
-                   task_tracker[id(cpu_buf)].result()
+                    task_tracker[id(cpu_buf)].result()
                 bufj2.get(out=cpu_buf, blocking=True)
-                task_tracker[id(cpu_buf)] = executor.submit(fast_scatter_add_k, j, idx_c1, idx_c2, cpu_buf)
+                task_tracker[id(cpu_buf)] = executor.submit(
+                    fast_scatter_add_k, j, idx_c1, idx_c2, cpu_buf)
 
             # (a_n,b_n,c_n) = (v1,e,f)(ijk)
             as_r6(z,m,'nijk','nkji','nikj')
@@ -733,7 +743,7 @@ def make_intermediates(mycc, t1, t2, eris):
             dispatch_j1(cpu_bufj1, cpu_a)
             lib.contraction('nkjl',eri_ovoo,'nijk',m,'nil',bufj2,alpha=-1.0)
             dispatch_k(cpu_bufj2, cpu_a, cpu_b)
-            
+
             # (a_n,b_n,c_n) = (e,v1,f)(jik)
             as_r6(z,m,'njik','njki','nkij')
             take_ovvv(eri_ovvv,c,a,lov,lvv)
@@ -781,12 +791,12 @@ def make_intermediates(mycc, t1, t2, eris):
             executor.shutdown()
             lov_ovoo = lpq = lov = lvv = None
             return
-        
+
         add_j(abc,joovv,cpu_buf1[:n],cpu_buf2[:n],cpu_buf1_asy[:n],cpu_buf2_asy[:n])
         m = z = bufz = None
-    
+
     # calculate l2_t
-    joovv = joovv + joovv.transpose(1,0,3,2) # performed on cpu
+    joovv = joovv + joovv.transpose(1,0,3,2)  # performed on cpu
     imds.l2_t = joovv + koovv
     joovv = koovv = None
 
@@ -794,7 +804,7 @@ def make_intermediates(mycc, t1, t2, eris):
     eia = cupy.asarray(e_occ)[:, None] - cupy.asarray(e_vir)[None, :]
     imds.l1_t /= eia
     eia = None
-    
+
     # div_d2 for l2_t (in cpu)
     e_occ = cupy.asnumpy(e_occ)
     e_vir = cupy.asnumpy(e_vir)
@@ -802,7 +812,7 @@ def make_intermediates(mycc, t1, t2, eris):
         for j in range(nocc):
             for a in range(nvir):
                 for b in range(nvir):
-                    e_ijab = e_occ[i] + e_occ[j] - e_vir[a] - e_vir[b]                   
+                    e_ijab = e_occ[i] + e_occ[j] - e_vir[a] - e_vir[b]
                     imds.l2_t[i, j, a, b] /= e_ijab
 
     buf = bufleft = tmpbuf = tmp_l1_t = eri_ovov = buf1 = buf2 = None
@@ -811,7 +821,7 @@ def make_intermediates(mycc, t1, t2, eris):
     lib.free_all_blocks()
     return imds
 
-def update_lambda(mycc, t1, t2, l1, l2, eris=None, imds=None): 
+def update_lambda(mycc, t1, t2, l1, l2, eris=None, imds=None):
     if eris is None: eris = mycc.ao2mo()
     if imds is None: imds = make_intermediates(mycc, t1, t2, eris)
     if not hasattr(imds, 'woooo'):

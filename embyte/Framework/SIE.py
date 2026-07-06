@@ -224,7 +224,7 @@ class SIE_kernel:
             self.LG.logger.info('eq_list: %s' % self.equivalent_list)
             self.LG.logger.info(
                 '=== Run HF for full system and build low_level_info')
-            
+
             if self.ewald_correct:
                 assert getattr(molecule, 'pbc_intor', None), \
                     'Ewald correction only supports PBC, please check the input molecule!'
@@ -331,7 +331,7 @@ class SIE_kernel:
                                 molecule, numpy.asarray(self.kpts)),
                             dtype=int,
                         )
-                    
+
                     from pyscf.pbc import tools
                     low_level_info.mol_full = tools.super_cell(
                         molecule, low_level_info.kmesh, wrap_around=False)
@@ -1177,7 +1177,7 @@ class SIE_kernel:
                 self.LG.logger.info(
                     'Total energy: %s' %
                     (self.energy.tolist()))
-                
+
                 for node_ind_kill in range(1, size):
                     comm2.send(
                         False, dest=node_ind_kill, tag=node_ind_kill)
@@ -1187,7 +1187,7 @@ class SIE_kernel:
 
             self.LG.logger.info(
                 '-------------- All process finished. Start to clean up!')
-            
+
             def delete_folders(path, parent_pattern, child_pattern):
                 for root, dirs, _ in os.walk(path):
                     for dir in fnmatch.filter(dirs, parent_pattern):

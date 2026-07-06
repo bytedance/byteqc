@@ -546,13 +546,13 @@ def get_I_mat2(mol, auxmol, coeff_o, coeff_v, nocc, path, log=None):
 
         i3c_h = lib.empty_from_buf(int3c_h[gid],
                                    (sQ.stop - sQ.start, nao, nao), 'f8')
-        
+
         # int3c_f.getitem(numpy.s_[sQ], pool=pools[gid], buf=i3c_h).wait()
         wait_getitem = int3c_f.getitem(numpy.s_[sQ], pool=pools[gid], buf=i3c_h)
         wait_loop(wait_getitem.waits)
         wait_getitem.wait()
         wait_getitem = None
-        
+
         i3c_d = lib.empty_from_buf(int3cs[gid], i3c_h.shape, 'f8')
         i3c_d.set(i3c_h)
 
@@ -574,7 +574,7 @@ def get_I_mat2(mol, auxmol, coeff_o, coeff_v, nocc, path, log=None):
     for pool in pools:
         pool.close()
         pool.join()
-    
+
     I_mat = cupy.asarray(I_mat_h).sum(axis=0)
     I_mat_d = I_mat_tmp_d = I_mat_h = int3cs = g3cs = gamma_3c_h = int3c_h = None
     coeff_o = coeff_v = org_coeff_o = org_coeff_v = None
@@ -1038,7 +1038,7 @@ def cderi_outcore_tmp(mol, auxmol, mo_coeff, path, log=None):
 def wait_loop(waits):
     tmp_a = cupy.random.randn(1000, 1000)
     tmp_b = cupy.random.randn(1000, 1000)
-    tmp_c = cupy.zeros((1000, 1000)) 
+    tmp_c = cupy.zeros((1000, 1000))
     while True:
         break_flag = True
         for w in waits:

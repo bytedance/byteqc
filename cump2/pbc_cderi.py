@@ -63,7 +63,7 @@ def cderi_ovL_gamma_point_outcore_gpu4pyscf(
     Lblksize=KBLKSIZE_1,
     Gblksize=GBLKSIZE_1,
 ):
-    
+
     cupy.cuda.get_current_stream().synchronize()
     lib.free_all_blocks()
     gc.collect()
@@ -72,7 +72,7 @@ def cderi_ovL_gamma_point_outcore_gpu4pyscf(
         path = tempfile.NamedTemporaryFile(dir=param.TMPDIR).name
     if not os.path.exists(path):
         os.mkdir(path)
-    
+
     if log is None:
         log = log.new_logger(cell, cell.verbose)
 
@@ -242,7 +242,7 @@ def cderi_ovL_gamma_point_outcore_gpu4pyscf(
     # Accumulate in host memory to reduce device-memory pressure for large MO spaces.
     read_host = cupyx.empty_pinned((Kblksize, nmo_i, nmo_j), dtype=numpy.float64, order="C")
     write_host = cupyx.empty_pinned((Kblksize, nmo_i, nmo_j), dtype=numpy.float64, order="C")
-    
+
     j3c_fit_pair_buf = cupy.empty((naux_fit, npair_blk_max), dtype=cupy.float64, order="C")
     pqG_buf = cupy.empty((npair_blk_max, Gblksize), dtype=cupy.complex128, order="C")
     j3c_raw_buf = cupy.empty(
@@ -324,10 +324,10 @@ def cderi_ovL_gamma_point_outcore_gpu4pyscf(
         waits_write = None
         # AO2MO in K-blocks to limit GPU memory footprint.
         for K0 in range(0, naux_fit, Kblksize):
-            
+
             K1 = min(naux_fit, K0 + Kblksize)
             Kblk = int(K1 - K0)
-            
+
             cupy.cuda.get_current_stream().synchronize()
             out_read_host = lib.empty_from_buf(read_host, (nmo_i, nmo_j, Kblk), 'f8')
             waits_read = cderi_file.getitem(numpy.s_[:, :, K0:K1], pool=pool_read, buf=out_read_host)
@@ -429,7 +429,7 @@ def cderi_ovL_gamma_point_outcore_gpu4pyscf_Mg(
     Lblksize=KBLKSIZE_1,
     Gblksize=GBLKSIZE_1,
 ):
-    
+
     Mg.mapgpu(lambda: cupy.cuda.get_current_stream().synchronize())
     Mg.mapgpu(lambda: lib.free_all_blocks())
     gc.collect()
@@ -438,7 +438,7 @@ def cderi_ovL_gamma_point_outcore_gpu4pyscf_Mg(
         path = tempfile.NamedTemporaryFile(dir=param.TMPDIR).name
     if not os.path.exists(path):
         os.mkdir(path)
-    
+
     if log is None:
         log = log.new_logger(cell, cell.verbose)
     time0 = logger.process_clock(), logger.perf_counter()
@@ -448,7 +448,7 @@ def cderi_ovL_gamma_point_outcore_gpu4pyscf_Mg(
 
     kmesh = numpy.array([1, 1, 1])
     ngpu = Mg.ngpu
-    
+
     int3c2e_opt = SRInt3c2eOpt(cell, auxcell, omega=-omega, bvk_kmesh=kmesh).build()
     cell = int3c2e_opt.cell
     auxcell = int3c2e_opt.auxcell
@@ -513,7 +513,7 @@ def cderi_ovL_gamma_point_outcore_gpu4pyscf_Mg(
     eval_j3c = [tmp_int3c2e_evaluator_list[i][0] for i in range(ngpu)]
     aux_sorting = tmp_int3c2e_evaluator_list[0][1]
     ao_pair_offsets = tmp_int3c2e_evaluator_list[0][2]
-    
+
     # _aux_offsets = None
 
     if hasattr(ao_pair_offsets, "get"):
@@ -658,7 +658,7 @@ def cderi_ovL_gamma_point_outcore_gpu4pyscf_Mg(
     # Accumulate in host memory to reduce device-memory pressure for large MO spaces.
     read_host = [cupyx.empty_pinned((Kblksize, nmo_i, nmo_j), dtype=numpy.float64, order="C") for _ in range(ngpu)]
     write_host = [cupyx.empty_pinned((Kblksize, nmo_i, nmo_j), dtype=numpy.float64, order="C") for _ in range(ngpu)]
-    
+
     j3c_fit_pair_buf = Mg.mapgpu(lambda: cupy.empty((naux_fit, npair_blk_max), dtype=cupy.float64, order="C"))
     pqG_buf = Mg.mapgpu(lambda: cupy.empty((npair_blk_max, Gblksize), dtype=cupy.complex128, order="C"))
     j3c_raw_buf = Mg.mapgpu(lambda: cupy.empty(
@@ -759,7 +759,7 @@ def cderi_ovL_gamma_point_outcore_gpu4pyscf_Mg(
             K0 = sK.start
             K1 = sK.stop
             Kblk = int(K1 - K0)
-            
+
             if ngpu > 1:
                 Mg.barrier()
             else:
@@ -823,7 +823,7 @@ def cderi_ovL_gamma_point_outcore_gpu4pyscf_Mg(
 
         if _ij_batch_id < shl_pair_batches:
             log.timer(
-                'cderi_ovL_gamma_point_outcore_gpu4pyscf_Mg ij_id:%d/%d on GPU%d' % 
+                'cderi_ovL_gamma_point_outcore_gpu4pyscf_Mg ij_id:%d/%d on GPU%d' %
                 (ij_batch_id, shl_pair_batches, gid), *time1)
 
 

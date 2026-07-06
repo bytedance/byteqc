@@ -127,11 +127,11 @@ def eri_OVL_SIE_MP2(
             'eri_OVL_SIE_MP2 expects either (..., logger) or (..., j2c, logger)'
         )
     _ = j2c
-    
+
     cupy.cuda.get_current_stream().synchronize()
     lib.free_all_blocks()
     gc.collect()
-    
+
 
     if omega is None:
         omega = OMEGA_MIN
@@ -304,7 +304,7 @@ def eri_OVL_SIE_MP2(
     ovL_cpu = cupyx.zeros_pinned((nmo_i1, nmo_j1, naux_fit), dtype=numpy.float64, order="C")
     voL_cpu = cupyx.zeros_pinned((nmo_j2, nmo_i2, naux_fit), dtype=numpy.float64, order="C")
     out_pqk_host = cupyx.empty_pinned((Kblksize, max(nmo_i1*nmo_j1, nmo_i2*nmo_j2)), dtype=numpy.float64, order="C")
-    
+
     j3c_fit_pair_buf = cupy.empty((naux_fit, npair_blk_max), dtype=cupy.float64, order="C")
     pqG_buf = cupy.empty((npair_blk_max, Gblksize), dtype=cupy.complex128, order="C")
     j3c_raw_buf = cupy.empty(
@@ -500,11 +500,11 @@ def eri_high_level_solver_incore(
             'eri_high_level_solver_incore expects either (..., logger) or (..., j2c, logger)'
         )
     _ = j2c
-    
+
     cupy.cuda.get_current_stream().synchronize()
     lib.free_all_blocks()
     gc.collect()
-    
+
 
     if omega is None:
         omega = OMEGA_MIN
@@ -668,7 +668,7 @@ def eri_high_level_solver_incore(
     # Accumulate in host memory to reduce device-memory pressure for large MO spaces.
     cderi_mo_cpu = cupyx.zeros_pinned((nmo_i, nmo_j, naux_fit), dtype=numpy.float64, order="C")
     out_pqk_host = cupyx.empty_pinned((Kblksize, nmo_i, nmo_j), dtype=numpy.float64, order="C")
-    
+
     j3c_fit_pair_buf = cupy.empty((naux_fit, npair_blk_max), dtype=cupy.float64, order="C")
     pqG_buf = cupy.empty((npair_blk_max, Gblksize), dtype=cupy.complex128, order="C")
     j3c_raw_buf = cupy.empty(
@@ -812,7 +812,7 @@ def eri_high_level_solver_incore(
 
     cupy.cuda.get_current_stream().synchronize()
     lib.free_all_blocks()
-    gc.collect()    
+    gc.collect()
 
     LL_svd = cupy.zeros((naux_fit, naux_fit), dtype='f8', order='F')
     nov_tot = nmo_i * nmo_j
@@ -829,7 +829,7 @@ def eri_high_level_solver_incore(
             0,
             nov_tot,
             slice_len_ov)]
-    
+
     cderi_mo_cpu = cderi_mo_cpu.reshape(-1, naux_fit)
     buffer_ovL = cupy.empty((slice_len_ov, naux_fit), dtype='f8')
 
@@ -859,7 +859,7 @@ def eri_high_level_solver_incore(
     naux_cut = newind.size
     U_svd = cupy.ascontiguousarray(U_svd[:, newind])
     L_cd = lib.gemm(U_svd, U_svd, transa='T', transb='N')
-    lib.linalg.cholesky(L_cd, overwrite=True)
+    lib.cholesky(L_cd, overwrite=True)
     U_svd = lib.gemm(U_svd, L_cd, transa='N', transb='N')
     L_cd = S = LL_svd = None
 
@@ -959,11 +959,11 @@ def eri_high_level_solver_incore_with_jk(
             '(..., logger, rdm1_core_coeff) or (..., j2c, logger, rdm1_core_coeff)'
         )
     _ = j2c
-    
+
     cupy.cuda.get_current_stream().synchronize()
     lib.free_all_blocks()
     gc.collect()
-    
+
     if rdm1_core_coeff is None:
         raise ValueError("rdm1_core_coeff is required")
     rdm1_core_coeff = cupy.asarray(rdm1_core_coeff, dtype=cupy.float64, order="C")
@@ -1133,7 +1133,7 @@ def eri_high_level_solver_incore_with_jk(
     # Accumulate in host memory to reduce device-memory pressure for large MO spaces.
     cderi_mo_cpu = cupyx.zeros_pinned((nmo, nmo, naux_fit), dtype=numpy.float64, order="C")
     out_pqk_host = cupyx.empty_pinned((Kblksize, nmo*max(nmo, ncore)), dtype=numpy.float64, order="C")
-    
+
     j3c_fit_pair_buf = cupy.empty((naux_fit, npair_blk_max), dtype=cupy.float64, order="C")
     pqG_buf = cupy.empty((npair_blk_max, Gblksize), dtype=cupy.complex128, order="C")
 
@@ -1357,7 +1357,7 @@ def eri_high_level_solver_incore_with_jk(
 
     cupy.cuda.get_current_stream().synchronize()
     lib.free_all_blocks()
-    gc.collect()    
+    gc.collect()
 
     LL_svd = cupy.zeros((naux_fit, naux_fit), dtype='f8', order='F')
     nov_tot = nmo * nmo
@@ -1374,7 +1374,7 @@ def eri_high_level_solver_incore_with_jk(
             0,
             nov_tot,
             slice_len_ov)]
-    
+
     cderi_mo_cpu = cderi_mo_cpu.reshape(-1, naux_fit)
     buffer_ovL = cupy.empty((slice_len_ov, naux_fit), dtype='f8')
 
@@ -1403,7 +1403,7 @@ def eri_high_level_solver_incore_with_jk(
     naux_cut = newind.size
     U_svd = cupy.ascontiguousarray(U_svd[:, newind])
     L_cd = lib.gemm(U_svd, U_svd, transa='T', transb='N')
-    lib.linalg.cholesky(L_cd, overwrite=True)
+    lib.cholesky(L_cd, overwrite=True)
     U_svd = lib.gemm(U_svd, L_cd, transa='N', transb='N')
     L_cd = S = LL_svd = None
 

@@ -301,7 +301,7 @@ def cderi_ovL_outcore(mol, auxmol, coeff_o, coeff_v,
             wait_loop(waits[gid])
             for w in waits[gid]:
                 w.wait()
-    
+
         cderi_h = lib.empty_from_buf(cderis_h[gid], cderi_d.shape)
         cderi_d.get(out=cderi_h, blocking=True)
         cderi_h = cderi_h.reshape(so_len, nvir, naux)
@@ -463,9 +463,9 @@ def mp2_get_corr(mol, path, oslices, nvir, nocc, naux, e_mo, log=None, with_rdm1
         p.terminate()
         p.join()
     ias_d = jbs_d = t2s = ias_h = jbs_h = pools = tau_d = e_mos = None
-    
+
     lib.Mg.mapgpu(lambda: lib.free_all_blocks())
-    
+
     e_corr = numpy.sum(e_corr_list).item()
 
     if with_rdm1:
@@ -632,7 +632,7 @@ def mp2_get_occ_1rdm(path, vslices, nvir, nocc, naux, e_mo, log,
 def wait_loop(waits):
     tmp_a = cupy.random.randn(1000, 1000)
     tmp_b = cupy.random.randn(1000, 1000)
-    tmp_c = cupy.zeros((1000, 1000)) 
+    tmp_c = cupy.zeros((1000, 1000))
     while True:
         break_flag = True
         for w in waits:

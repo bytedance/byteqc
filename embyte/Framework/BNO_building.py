@@ -247,7 +247,7 @@ def SIE_BNO_builder(low_level_info, fb_size_list, LOEO,
     mo_vir_coeff = moeo_vir_coeff \
         = subspace_fb_occ_full_vir_mo_energy = ovL_fb_occ_full_vir \
         = subspace_fb_occ_full_vir_LOMO = None
-    
+
     lib.free_all_blocks()
     gc.collect()
 
@@ -374,7 +374,7 @@ def SIE_BNO_builder(low_level_info, fb_size_list, LOEO,
                 gamma_occ_d,
                 alpha=-2.0,
                 beta=1.0)
-        
+
         cupy.cuda.get_current_stream().synchronize()
         logger.info('mp2 nvir:[%d:%d]/%d' % (sv1.start, sv1.stop, nvir))
 
