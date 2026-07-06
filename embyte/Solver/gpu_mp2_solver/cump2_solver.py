@@ -20,6 +20,7 @@ from pyscf.lib import prange
 from pyscf import gto
 from byteqc.embyte.Tools.tool_lib import fix_orbital_sign
 from byteqc.embyte.ERI import eri_trans
+# from byteqc.embyte.ERI import eri_trans_gpu4pyscf as eri_trans_g
 from multiprocessing import Pool
 import numpy
 import cupyx
@@ -60,6 +61,23 @@ class GPU_MP2Solver():
     def __init__(self):
         self.__name__ = 'GPU_MP2Solver'
 
+    def cleanup(self):
+        for attr in (
+                'eri_general', 't2c', 'projector', 'orb_energy', 'EOMO',
+                'AOMO', 'e_corr', 'eri_file', 'vhfopt3c'):
+            if hasattr(self, attr):
+                setattr(self, attr, None)
+        try:
+            cupy.cuda.get_current_stream().synchronize()
+        except Exception:
+            pass
+        try:
+            lib.free_all_blocks()
+            cupy.get_default_pinned_memory_pool().free_all_blocks()
+        except Exception:
+            pass
+        gc.collect()
+
     def make_param(
         self,
         nelec_high,
@@ -80,7 +98,7 @@ class GPU_MP2Solver():
 
         nocc = round(nelec_high // 2)
 
-        LOEO, self.orb_energy, self.EOMO, self.LOMO, self.AOMO = self.get_coeff(
+        self.orb_energy, self.EOMO, self.AOMO = self.get_coeff(
             LOBNO, cluster_list, low_level_info)
         self.projector = self.EOMO[:, :nocc].T[:, :nfrag].copy()
         mol_frag = gto.Mole()
@@ -91,7 +109,9 @@ class GPU_MP2Solver():
 
         self.nocc = nocc
         self.nvir = (self.AOMO.shape[1] - nocc)
-        self.AOMO = self.AOMO
+        self.ewald_correct = low_level_info.ewald_correct
+        if low_level_info.ewald_correct:
+            self.madelung = low_level_info.madelung
 
         lib.free_all_blocks()
         gc.collect()
@@ -103,16 +123,20 @@ class GPU_MP2Solver():
         if save_or_load:
             if self.eri_file is None:
                 self.eri_general = eri_trans.eri_high_level_solver_incore(
-                    low_level_info.mol_full,
-                    low_level_info.auxmol,
+                    low_level_info.eri_mol,
+                    low_level_info.eri_auxmol,
                     self.AOMO[:, :self.nocc],
                     self.AOMO[:, self.nocc:],
                     low_level_info.j2c,
                     self.Logger,
                     solver_type='MP2',
                     vhfopt=self.vhfopt3c,
-                    svd_tol=1e-4)
+                    svd_tol=1e-4,
+                    kpts=low_level_info.kpts)
             else:
+                if low_level_info.kpts is not None:
+                    raise NotImplementedError(
+                        'On-disk high-level ERI is not supported when kpts is provided')
                 self.eri_general = eri_trans.eri_ondisk_high_level_solver_incore(
                     low_level_info.mol_full,
                     self.eri_file,
@@ -139,6 +163,7 @@ class GPU_MP2Solver():
             # pool_rw.close()
             # pool_rw.join()
             file.close()
+            cderi = wait_list = file = None
 
         else:
             self.Logger.info(
@@ -159,25 +184,29 @@ class GPU_MP2Solver():
             pool_rw.close()
             pool_rw.join()
             file.close()
+            cderi = wait_list = pool_rw = file = None
+
+        lib.free_all_blocks()
+        gc.collect()
 
     def get_cluster_coeff(self):
 
-        return self.EOMO, self.LOMO
+        return self.EOMO
 
     def get_coeff(self, LOBNO, cluster_list, low_level_info):
         LOEO = cupy.asarray(LOBNO[:, cluster_list])
         Fock_clu = cupy.einsum(
             'ip, jq, ij -> pq',
-            cupy.asarray(LOEO),
-            cupy.asarray(LOEO),
+            LOEO,
+            LOEO,
             cupy.asarray(
                 low_level_info.fock_LO))
         orb_energy, EOMO = cupy.linalg.eigh(Fock_clu)
         EOMO = fix_orbital_sign(EOMO)
         LOMO = cupy.dot(LOEO, EOMO)
-        AOMO = cupy.dot(low_level_info.AOLO, LOMO)
+        AOMO = cupy.dot(cupy.asarray(low_level_info.AOLO), LOMO)
 
-        return LOEO, orb_energy, EOMO, LOMO, AOMO
+        return orb_energy, EOMO, AOMO
 
     def kernel(self):
         # Here kernel only for sync the code sturcture for CC
@@ -195,6 +224,8 @@ class GPU_MP2Solver():
         naux = ovL.shape[-1]
 
         occ_energy = self.orb_energy[: nocc]
+        if self.ewald_correct:
+            occ_energy -= self.madelung
         vir_energy = self.orb_energy[nocc:]
 
         avail_mem = lib.gpu_avail_bytes() / 8 - nfrag * nvir * naux * 2
@@ -374,6 +405,8 @@ class GPU_MP2Solver():
 
         buffer_ia_d = buffer_jb_d = buffer_t2_d = buffer_t2_c_d = buffer_t2_c_h = fvL = fvL_tmp = None
         is_aL = t2 = t2_c = tmp_t2_c_h = js_bL = None
+        lib.free_all_blocks()
+        gc.collect()
 
     def get_frag_correlation_energy(self, if_RDM=True):
         if if_RDM:

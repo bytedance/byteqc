@@ -30,6 +30,12 @@ import cupy
 cupy.cuda.set_pinned_memory_allocator(None)
 
 
+def _impurity_nelec_only(cluster_list, core_occupied, number_active_electrons):
+    core_occupied = numpy.asarray(core_occupied).copy()
+    core_occupied[cluster_list] = 0
+    return round(number_active_electrons - numpy.sum(core_occupied))
+
+
 class high_level_processing:
 
     '''
@@ -57,15 +63,52 @@ class high_level_processing:
         self.in_situ_T = True
         self.eri = None
         self.equivalent_list = None
+        self._active_high_level_solver = None
+
+    def cleanup_cluster_state(self):
+        solver = getattr(self, '_active_high_level_solver', None)
+        if solver is not None and hasattr(solver, 'cleanup'):
+            try:
+                solver.cleanup()
+            except Exception:
+                pass
+        self._active_high_level_solver = None
+
+        lg = getattr(self, 'LG', None)
+        if lg is not None and hasattr(lg, 'close'):
+            try:
+                lg.close()
+            except Exception:
+                pass
+
+        for attr in (
+                'low_level_info', 'LG', 'PR', 'cluster_index_i', 'logfile_i',
+                'equi_frag', 'symm_op', 'symm_op_t', 'symm_op_class',
+                '_active_high_level_solver'):
+            if hasattr(self, attr):
+                setattr(self, attr, None)
+
+        try:
+            cupy.cuda.get_current_stream().synchronize()
+        except Exception:
+            pass
+        try:
+            lib.free_all_blocks()
+        except Exception:
+            pass
+        try:
+            cupy.get_default_pinned_memory_pool().free_all_blocks()
+        except Exception:
+            pass
+        gc.collect()
 
     def kernel(self, cluster_index_i):
         '''
         Do the high-level calculation for the fragment with the index of cluster_index_i.
         '''
         import pickle
-        f = open(self.low_level_info_add, 'rb')
-        self.low_level_info = pickle.loads(f.read())
-        f.close()
+        with open(self.low_level_info_add, 'rb') as f:
+            self.low_level_info = pickle.load(f)
 
         lib.free_all_blocks()
 
@@ -129,7 +172,7 @@ class high_level_processing:
             self.LG.logger.info('= Get bath and embedding orbitals cccupation')
             LOEO, EO_occupation, frag_bath_size, frag_bath_nelectron = Get_bath(
                 self.low_level_info.mol_full, frag_bath_size, frag_orb_index,
-                self.low_level_info.onerdm_low)
+                self.low_level_info.onerdm_low, self.LG.logger)
             self.LG.logger.info(
                 '= Get bath and embedding orbitals cccupation Done!')
 
@@ -143,32 +186,17 @@ class high_level_processing:
 
             norb_fb = frag_bath_size[0] + frag_bath_size[1]
 
-            init_cluster_fock = cupy.asarray(reduce(
-                cupy.dot, (LOEO[:, :norb_fb].T, self.low_level_info.fock_LO, LOEO[:, :norb_fb])))
-            init_cluster_mo_energy, init_cluster_mo_coeff = cupy.linalg.eigh(
-                init_cluster_fock)
-            init_cluster_mo_coeff = fix_orbital_sign(init_cluster_mo_coeff)
             init_cluster_nele = round(
                 self.low_level_info.mol_full.nelectron - numpy.sum(EO_occupation))
 
-            del init_cluster_fock
-
             self.LG.logger.info(
                 '=== Start to build BNO')
-
-            LOEO = cupy.asarray(LOEO)
-            LO_init_cluster_MO = cupy.dot(
-                LOEO[:, :norb_fb], init_cluster_mo_coeff)
-            self.cluster_mo_coeff = init_cluster_mo_coeff.copy()
-            LO_init_cluster_MO = cupy.hstack(
-                (LO_init_cluster_MO, LOEO[:, norb_fb:]))
 
             EO_occupation = numpy.asarray(EO_occupation)
 
             EO_occupation[: round(init_cluster_nele // 2)] = 2
 
             cluster_list = list(range(norb_fb))
-            LOBNO = LOEO.copy()
             ele_diff = []
 
             if cheat_th is not None:
@@ -176,27 +204,34 @@ class high_level_processing:
             else:
                 threshold_cluster = self.threshold
 
-            LOBNO, ele_diff = SIE_BNO_builder(self.low_level_info, frag_bath_size, LOEO.get(
-            ), EO_occupation, vhfopt=self.vhfopt, logger=self.LG.logger, eri=self.eri)
+            lib.free_all_blocks()
+            gc.collect()
+
+            LOBNO, ele_diff = SIE_BNO_builder(self.low_level_info, frag_bath_size, LOEO,
+                                             EO_occupation, vhfopt=self.vhfopt, logger=self.LG.logger, eri=self.eri)
             LOEO = None
             LOBNO = cupy.asarray(LOBNO)
 
-            del LO_init_cluster_MO, threshold_cluster
+            lib.free_all_blocks()
+            gc.collect()
+
+            del threshold_cluster
 
             new_index = (-numpy.array(ele_diff)).argsort()
             LOBNO[:, norb_fb:] = LOBNO[:, norb_fb:][:, new_index]
+            LOBNO = LOBNO.get(blocking=True)
+
+            lib.free_all_blocks()
+            gc.collect()
 
             ele_diff = numpy.array(ele_diff)[new_index]
             EO_occupation = list(EO_occupation[:norb_fb]) + list(
                 numpy.array(EO_occupation[norb_fb:])[new_index])
 
-            del init_cluster_mo_coeff
-
-            self.PR.save_obj(LOBNO, 'LOBNO')
+            self.PR.save_array_mp(LOBNO, 'LOBNO')
             self.PR.save_obj(ele_diff, 'ele_diff')
             self.PR.save_obj(EO_occupation, 'EO_occupation')
             self.PR.save_obj(cluster_list, 'cluster_list')
-            self.PR.save_obj(self.cluster_mo_coeff, 'mf_fb_mo_coeff')
             self.PR.save_obj(frag_bath_size, 'frag_bath_size')
             self.PR.recorder['norb_fb'] = str(norb_fb)
             self.PR.recorder['stage']['0'] = True
@@ -220,14 +255,12 @@ class high_level_processing:
         else:
             frag_bath_size = self.PR.load_class(
                 self.PR.recorder['frag_bath_size'])
-            LOBNO = cupy.asarray(self.PR.load_class(self.PR.recorder['LOBNO']))
+            LOBNO = self.PR.load_array_mp(self.PR.recorder['LOBNO'])
             ele_diff = self.PR.load_class(self.PR.recorder['ele_diff'])
             EO_occupation = self.PR.load_class(
                 self.PR.recorder['EO_occupation'])
             cluster_list = self.PR.load_class(self.PR.recorder['cluster_list'])
             norb_fb = int(self.PR.recorder['norb_fb'])
-            self.cluster_mo_coeff = self.PR.load_class(
-                self.PR.recorder['mf_fb_mo_coeff'])
             self.LG.logger.info(
                 '=== Load Check point: Selection for extension bath')
 
@@ -290,10 +323,18 @@ class high_level_processing:
                 'The cluster %d orbitals: %d / %d in the threshold %s' %
                 (cluster_index_i, len(cluster_list), LOBNO.shape[0], th_str))
 
-            nelec_high, rdm1_core, rdm1_core_coeff = Impurity_1rdm(
-                cluster_list, LOBNO, EO_occupation, self.low_level_info.mol_full.nelectron)
             if 'MP2' in self.electronic_structure_solver.__name__:
+                nelec_high = _impurity_nelec_only(
+                    cluster_list,
+                    EO_occupation,
+                    self.low_level_info.mol_full.nelectron)
                 rdm1_core_coeff = None
+            else:
+                nelec_high, rdm1_core_coeff = Impurity_1rdm(
+                    cluster_list,
+                    LOBNO,
+                    EO_occupation,
+                    self.low_level_info.mol_full.nelectron)
 
             if numpy.isclose(nelec_high, 0):
                 self.LG.logger.info(
@@ -301,6 +342,7 @@ class high_level_processing:
                 return 0, 0
 
             high_level_solver_frag = self.electronic_structure_solver()
+            self._active_high_level_solver = high_level_solver_frag
 
             high_level_solver_frag.make_param(nelec_high,
                                               cluster_list,
@@ -331,7 +373,7 @@ class high_level_processing:
                 self.PR.recorder['eri_path'][th_index] = eri_path
                 self.PR.save()
 
-            mf_fragment_mo_coeff, LOMO = high_level_solver_frag.get_cluster_coeff()
+            mf_fragment_mo_coeff = high_level_solver_frag.get_cluster_coeff()
 
             if not self.PR.recorder['solver_finish'][th_index]:
                 high_level_solver_frag.kernel()
@@ -358,6 +400,21 @@ class high_level_processing:
                 # pool_rw.close()
                 # pool_rw.join()
                 file.close()
+                t1_path = self.PR.filepath + '/th_%s/' % th_str + 't1'
+                try:
+                    t1_h = high_level_solver_frag.t1.asnumpy()
+                except BaseException:
+                    t1_h = high_level_solver_frag.t1
+
+                def save_amp(amp_path, amp_name, amp, logger):
+                    with h5py.File(amp_path, 'w') as f:
+                        f.create_dataset(
+                            amp_name, dtype='float64', shape=amp.shape)
+                        f[amp_name].write_direct(amp)
+                    logger.info(f'Finish saving {amp_name}')
+
+                save_amp(t1_path, 't1', t1_h, self.LG.logger)
+
 
             if self.RDM and not self.PR.recorder['solver_finish'][th_index]:
 
@@ -441,9 +498,13 @@ class high_level_processing:
 
                 for equi_frag_ind in self.equi_frag:
                     frag_equi_op = self.fragments[equi_frag_ind]['equivalent_operator']
-                    AOLO = self.low_level_info.AOLO.get().copy()
-                    LOMO = self.low_level_info.LOMO.copy()
-                    LO_BNO_clu = LOBNO[:, cluster_list].get()
+                    AOLO = self.low_level_info.AOLO
+                    LOMO = self.low_level_info.LOMO
+                    LO_BNO_clu = LOBNO[:, cluster_list]
+                    if hasattr(LO_BNO_clu, 'get'):
+                        LO_BNO_clu = LO_BNO_clu.get(blocking=True)
+                    else:
+                        LO_BNO_clu = numpy.asarray(LO_BNO_clu)
                     AOMO = numpy.dot(AOLO, LOMO)
                     AO_BNO_clu = numpy.dot(AOLO, LO_BNO_clu)
 
@@ -460,7 +521,7 @@ class high_level_processing:
                     AO_MO_vir = AOMO[:, nocc_full:]
                     AO_CLU = cupy.dot(
                         cupy.asarray(AO_BNO_clu),
-                        cupy.asarray(mf_fragment_mo_coeff)).get()
+                        cupy.asarray(mf_fragment_mo_coeff)).get(blocking=True)
                     nocc_cluster = round(nelec_high // 2)
                     AO_CLU_occ = AO_CLU[:, : nocc_cluster]
                     AO_CLU_vir = AO_CLU[:, nocc_cluster:]
@@ -473,26 +534,26 @@ class high_level_processing:
                         (cupy.asarray(
                             AO_MO_occ.T),
                             cupy.asarray(S),
-                            cupy.asarray(AO_CLU_occ))).get()
+                            cupy.asarray(AO_CLU_occ))).get(blocking=True)
                     MO_vir_CLU_vir = reduce(
                         cupy.dot,
                         (cupy.asarray(
                             AO_MO_vir.T),
                             cupy.asarray(S),
-                            cupy.asarray(AO_CLU_vir))).get()
+                            cupy.asarray(AO_CLU_vir))).get(blocking=True)
                     CLU_occ_FRAG = reduce(
                         cupy.dot,
                         (cupy.asarray(
                             AO_CLU_occ.T),
                             cupy.asarray(S),
-                            cupy.asarray(AO_FRAG))).get()
+                            cupy.asarray(AO_FRAG))).get(blocking=True)
                     MO_occ_FRAG = reduce(
                         cupy.dot,
                         (cupy.asarray(
                             AO_MO_occ.T),
                             cupy.asarray(S),
-                            cupy.asarray(AO_FRAG))).get()
-
+                            cupy.asarray(AO_FRAG))).get(blocking=True)
+                    AOLO = cupy.asarray(AOLO)
                     LO_CLU_occ = reduce(
                         cupy.dot,
                         (cupy.asarray(
@@ -618,7 +679,14 @@ class high_level_processing:
                     (th_str, et))
                 self.LG.logger.info('--------------')
 
+            if hasattr(high_level_solver_frag, 'cleanup'):
+                high_level_solver_frag.cleanup()
             high_level_solver_frag = None
+            self._active_high_level_solver = None
+            cupy.cuda.get_current_stream().synchronize()
+            lib.free_all_blocks()
+            gc.collect()
+
             self.PR.recorder['high_level_solved'][th_index] = True
             self.PR.save()
             shutil.rmtree(self.PR.recorder['eri_path'][th_index])
@@ -626,6 +694,8 @@ class high_level_processing:
                 file = lib.FileMp(os.path.join(t1t2_path, '_t2'), 'a')
                 del file['t2']
                 file.close()
+
+            self.PR.delet_obj('LOBNO')
 
         self.PR.recorder['stage'][1] = True
         self.PR.save()

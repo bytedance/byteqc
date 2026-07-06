@@ -45,7 +45,7 @@ from pyscf import ao2mo
 
 
 def kernel(mycc, eris=None, t1=None, t2=None, max_cycle=50,
-           tol=1e-8, tolnormt=1e-6, verbose=None, callback=None):
+           tol=1e-8, tolnormt=1e-6, verbose=None, callback=None, with_em=False):
     log = logger.new_logger(mycc, verbose)
     if eris is None:
         eris = mycc.ao2mo(mycc.mo_coeff)
@@ -63,7 +63,7 @@ def kernel(mycc, eris=None, t1=None, t2=None, max_cycle=50,
 
     cput1 = cput0 = (logger.process_clock(), logger.perf_counter())
     eold = 0
-    eccsd = mycc.energy(t1, t2, eris)
+    eccsd, em = mycc.energy(t1, t2, eris, with_em)
     log.info('Init E_corr(CCSD) = %.15g', eccsd)
 
     if isinstance(mycc.diis, diis.DIIS):
@@ -94,7 +94,10 @@ def kernel(mycc, eris=None, t1=None, t2=None, max_cycle=50,
         t1, t1new = t1new, t1
         t2, t2new = t2new, t2
         t1, t2 = mycc.run_diis(t1, t2, istep, normt, eccsd - eold, adiis)
-        eold, eccsd = eccsd, mycc.energy(t1, t2, eris)
+        # eold, eccsd = eccsd, mycc.energy(t1, t2, eris)
+        eold = eccsd
+        eccsd, em = mycc.energy(t1, t2, eris, with_em)
+
         log.info(
             'cycle = %d  E_corr(CCSD) = %.15g  dE = %.9g  norm(t1,t2) = %.6g',
             istep + 1, eccsd, eccsd - eold, normt)
@@ -104,7 +107,7 @@ def kernel(mycc, eris=None, t1=None, t2=None, max_cycle=50,
             break
     log.timer('CCSD', *cput0)
     lib.free_all_blocks()
-    return conv, eccsd, t1, t2
+    return conv, eccsd, t1, t2, em
 
 
 def diffabs2_t2(mycc, t2, t2new):
@@ -493,7 +496,7 @@ class CCSD(cc.ccsd.CCSD):
         r = culib.current_memory()
         log.info('max_GPU_memory %d MB (current use %d MB)', r[1], r[0])
 
-    def ccsd(self, t1=None, t2=None, eris=None):
+    def ccsd(self, t1=None, t2=None, eris=None, with_em=False):
         assert (self.mo_coeff is not None)
         assert (self.mo_occ is not None)
 
@@ -508,10 +511,10 @@ class CCSD(cc.ccsd.CCSD):
         if self.e_hf is None:
             self.e_hf = self._scf.e_tot
 
-        self.converged, self.e_corr, self.t1, self.t2 = \
+        self.converged, self.e_corr, self.t1, self.t2, self.em = \
             kernel(self, eris, t1, t2, max_cycle=self.max_cycle,
                    tol=self.conv_tol, tolnormt=self.conv_tol_normt,
-                   verbose=self.verbose, callback=self.callback)
+                   verbose=self.verbose, callback=self.callback, with_em=with_em)
         self._finalize()
         return self.e_corr, self.t1, self.t2
 
@@ -559,11 +562,12 @@ class CCSD(cc.ccsd.CCSD):
             with t2[p0:p1] as t2arr:
                 ker(nocc, nvir, p0, eris_ovov, mo_e, t2arr)
                 emp2 += culib.contraction(
-                    'ijab', t2arr, 'iajb', eris_ovov, '', alpha=2.0).item()
+                    'ijab', t2arr, 'iajb', eris_ovov, 'i',
+                    alpha=2.0).sum().item()
                 eris_ovov = eris.ovov.getitem(numpy.s_[:, :, p0:p1],
                                               buf=eris_ovov)
                 emp2 -= culib.contraction(
-                    'jiab', t2arr, 'iajb', eris_ovov, '', alpha=1.0).item()
+                    'jiab', t2arr, 'iajb', eris_ovov, 'j').sum().item()
             t2arr = None
         eris_ovov = mo_e = None
         self.emp2 = emp2.real
@@ -576,7 +580,7 @@ class CCSD(cc.ccsd.CCSD):
         lib.free_all_blocks()
         return self.emp2, t1, t2
 
-    def energy(mycc, t1=None, t2=None, eris=None):
+    def energy(mycc, t1=None, t2=None, eris=None, with_em=False):
         '''CCSD correlation energy'''
         if t1 is None:
             t1 = mycc.t1
@@ -587,8 +591,12 @@ class CCSD(cc.ccsd.CCSD):
 
         nocc, nvir = t1.shape
         fock = cupy.asarray(eris.fock[:nocc, nocc:])
-        e = culib.contraction('ia', fock, 'ia', t1, '').item() * 2
+        e = fock.ravel().dot(t1.ravel()).item() * 2
         fock = None
+        if with_em:
+            em = cupy.zeros((nocc, nocc))
+        else:
+            em = None
 
         memory = mycc.pool.free_memory
         itemsize = t2.dtype.itemsize
@@ -602,17 +610,28 @@ class CCSD(cc.ccsd.CCSD):
             tau = t2[p0:p1].ascupy(copy=True, buf=buf2)
             tau = culib.contraction(
                 'ia', t1[p0:p1], 'jb', t1, 'ijab', tau, beta=1.0)
-            e += culib.contraction('ijab', tau, 'iajb',
-                                   eris_ovov, '', alpha=2.0).item()
+            if with_em:
+                culib.contraction(
+                    'ipab', tau, 'iaqb', eris_ovov, 'pq', em, alpha=2.0, beta=1.0)
+            else:
+                e += culib.contraction(
+                    'ijab', tau, 'iajb', eris_ovov, 'i',
+                    alpha=2.0).sum().item()
             eris_ovov = eris.ovov.getitem(
                 numpy.s_[:, :, p0:p1], buf=eris_ovov)
-            e -= culib.contraction('iajb', eris_ovov, 'jiab', tau, '').item()
+            if with_em:
+                culib.contraction('qajb', eris_ovov, 'jpab', tau, 'pq', em, alpha=-1.0, beta=1.0)
+            else:
+                e -= culib.contraction(
+                    'iajb', eris_ovov, 'jiab', tau, 'j').sum().item()
         buf = buf1 = buf2 = eris_ovov = tau = None
         lib.free_all_blocks()
+        if with_em:
+            e += em.trace().item()
         if abs(e.imag) > 1e-4:
             logger.warn(
                 mycc, 'Non-zero imaginary part found in CCSD energy %s', e)
-        return e.real
+        return e.real, em
 
     def _add_vvvv(mycc, t1, t2, eris, out=None, with_ovvv=None, t2sym=None):
         if t2sym in ('jiba', '-jiba', '-jiab'):

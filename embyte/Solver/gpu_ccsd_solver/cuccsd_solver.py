@@ -17,6 +17,7 @@ import h5py
 from pyscf.lib import prange
 import gc
 from byteqc.embyte.ERI import eri_trans
+# from byteqc.embyte.ERI import eri_trans_gpu4pyscf as eri_trans_g
 from functools import reduce
 import cupyx
 from byteqc import lib
@@ -33,7 +34,7 @@ import numpy
 import os
 import cupy
 cupy.cuda.set_pinned_memory_allocator(None)
-
+CC_MEM_RATIO = 0.7
 
 def _make_df_eris(mycc, projector, mo_coeff=None):
     eris = _ChemistsERIs()
@@ -120,7 +121,61 @@ class GPU_CCSDSolver():
 
     def __init__(self):
         self.cc_fragment = None
+        self.pool = None
         self.__name__ = 'GPU_CCSDSolver'
+
+    def cleanup(self):
+        '''
+        Explicitly release large CCSD-side objects and close the BufferPool
+        HDF5 backend.  Relying on Python GC is too late for long SIE runs.
+        '''
+        pool = getattr(self, 'pool', None)
+        cc_fragment = getattr(self, 'cc_fragment', None)
+        if pool is None and cc_fragment is not None:
+            pool = getattr(cc_fragment, 'pool', None)
+
+        try:
+            cupy.cuda.get_current_stream().synchronize()
+        except Exception:
+            pass
+
+        for attr in (
+                'eris', 'eri_general', 'cluster_oei', 't1', 't2', 't1c',
+                't2c', 't1x', 'l1', 'l2', 'l1x', 'l2c', 'l2x', 'fock',
+                'LOEO', 'EOMO', 'LOMO', 'AOMO', 'projector',
+                'rdm1_core_coeff'):
+            if hasattr(self, attr):
+                setattr(self, attr, None)
+
+        if cc_fragment is not None:
+            for attr in ('t1', 't2', 'eris', 'diis'):
+                if hasattr(cc_fragment, attr):
+                    setattr(cc_fragment, attr, None)
+            if hasattr(cc_fragment, 'pool'):
+                cc_fragment.pool = None
+        self.cc_fragment = None
+
+        if pool is not None:
+            file_obj = getattr(pool, 'file', None)
+            if file_obj is not None:
+                try:
+                    if getattr(file_obj, 'id', None) is not None and file_obj.id.valid:
+                        file_obj.flush()
+                        file_obj.close()
+                except Exception:
+                    pass
+                try:
+                    pool.file = None
+                except Exception:
+                    pass
+        self.pool = None
+
+        try:
+            lib.free_all_blocks()
+            cupy.get_default_pinned_memory_pool().free_all_blocks()
+        except Exception:
+            pass
+        gc.collect()
 
     def make_param(
         self,
@@ -141,12 +196,15 @@ class GPU_CCSDSolver():
         self.rdm1_core_coeff = rdm1_core_coeff
         self.cluster_list = cluster_list
         self.nelec_high = nelec_high
+        self.ewald_correct = low_level_info.ewald_correct
+        if low_level_info.ewald_correct:
+            self.madelung = low_level_info.madelung
 
         Logger.info('==== CCSD (cucc) solver has been used here ====')
 
         nocc = round(nelec_high // 2)
 
-        self.LOEO, self.orb_energy, self.EOMO, self.LOMO, self.AOMO = self.get_coeff(
+        self.LOEO, _, self.EOMO, self.LOMO, self.AOMO = self.get_coeff(
             LOBNO, cluster_list, low_level_info)
         self.projector = self.EOMO[:, :nocc].T[:, :nfrag].copy()
         self.nocc = nocc
@@ -159,26 +217,36 @@ class GPU_CCSDSolver():
         Load/Generate a CDERI for cluster.
         '''
 
-        AOLO = cupy.asarray(low_level_info.AOLO)
-        rdm1_core_coeff = reduce(
-            cupy.dot, (AOLO, cupy.asarray(
-                self.rdm1_core_coeff)))
-        rdm1_core = reduce(cupy.dot, (rdm1_core_coeff, rdm1_core_coeff.T))
+        has_core = (
+            self.rdm1_core_coeff is not None
+            and self.rdm1_core_coeff.shape[1] > 0
+        )
+        if has_core:
+            AOLO = cupy.asarray(low_level_info.AOLO)
+            rdm1_core_coeff = reduce(
+                cupy.dot, (AOLO, cupy.asarray(
+                    self.rdm1_core_coeff)))
+            AOLO = None
+        else:
+            rdm1_core_coeff = None
+        self.rdm1_core_coeff = None
+        lib.free_all_blocks()
+        j = k = veff = None
 
         if save_or_load:
             if self.eri_file is None:
 
-                if rdm1_core.any():
-
+                if has_core:
                     self.eri_general, j, k, = eri_trans.eri_high_level_solver_incore_with_jk(
-                        low_level_info.mol_full,
-                        low_level_info.auxmol,
+                        low_level_info.eri_mol,
+                        low_level_info.eri_auxmol,
                         self.AOMO,
                         low_level_info.j2c,
                         self.Logger,
                         rdm1_core_coeff,
                         vhfopt=self.vhfopt3c,
-                        svd_tol=1e-4)
+                        svd_tol=1e-4,
+                        kpts=low_level_info.kpts)
 
                     veff = cupy.asarray(j - 0.5 * k)
                     self.cluster_oei = reduce(
@@ -189,15 +257,16 @@ class GPU_CCSDSolver():
 
                 else:
                     self.eri_general = eri_trans.eri_high_level_solver_incore(
-                        low_level_info.mol_full,
-                        low_level_info.auxmol,
+                        low_level_info.eri_mol,
+                        low_level_info.eri_auxmol,
                         self.AOMO,
                         self.AOMO,
                         low_level_info.j2c,
                         self.Logger,
                         solver_type='CCSD',
                         vhfopt=self.vhfopt3c,
-                        svd_tol=1e-4)
+                        svd_tol=1e-4,
+                        kpts=low_level_info.kpts)
 
                     self.cluster_oei = cupy.asarray(low_level_info.oei_LO)
                     self.cluster_oei = reduce(
@@ -205,7 +274,10 @@ class GPU_CCSDSolver():
                         blocking=True)
 
             else:
-                if rdm1_core.any():
+                if has_core:
+                    if low_level_info.kpts is not None:
+                        raise NotImplementedError(
+                            'On-disk JK route is not supported when kpts is provided')
 
                     self.eri_general, j, k = eri_trans.eri_ondisk_high_level_solver_incore_with_jk(
                         low_level_info.mol_full,
@@ -223,6 +295,9 @@ class GPU_CCSDSolver():
                     self.cluster_oei = self.cluster_oei.get(blocking=True)
 
                 else:
+                    if low_level_info.kpts is not None:
+                        raise NotImplementedError(
+                            'On-disk high-level ERI is not supported when kpts is provided')
 
                     self.eri_general = eri_trans.eri_ondisk_high_level_solver_incore(
                         low_level_info.mol_full,
@@ -238,7 +313,7 @@ class GPU_CCSDSolver():
                         cupy.dot, (self.LOMO.T, self.cluster_oei, self.LOMO)).get(
                         blocking=True)
 
-            # pool_rw = Pool(processes=min(lib.NumFileProcess, self.eri_general.shape[0]))
+            lib.free_all_blocks()
             file = lib.FileMp(
                 os.path.join(
                     eri_path,
@@ -247,20 +322,20 @@ class GPU_CCSDSolver():
             blk = max(int(self.eri_general.shape[0] / lib.NumFileProcess), 1)
             cderi = file.create_dataset(
                 'cderi', self.eri_general.shape, 'f8', blksizes=(blk))
-            # wait_list = cderi.setitem(
-            #     numpy.s_[:], self.eri_general, pool=pool_rw)
+
             wait_list = cderi.setitem(
                 numpy.s_[:], self.eri_general)
             for w in wait_list:
                 w.wait()
-            # pool_rw.close()
-            # pool_rw.join()
+
             file.close()
+            cderi = wait_list = file = None
             numpy.save(
                 os.path.join(
                     eri_path,
                     'cluster_oei.npy'),
                 self.cluster_oei)
+            self.Logger.info('Save cderi and oei to disk.')
 
         else:
             self.Logger.info('Load cderi from disk path : %s' %
@@ -280,16 +355,19 @@ class GPU_CCSDSolver():
             pool_rw.close()
             pool_rw.join()
             file.close()
+            cderi = wait_list = pool_rw = file = None
             self.cluster_oei = numpy.load(
                 os.path.join(eri_path, 'cluster_oei.npy'))
 
         self.eri_general = self.eri_general.reshape(
             self.eri_general.shape[0], self.nmo, self.nmo)
-        veff = None
+        rdm1_core_coeff = j = k = veff = None
+        lib.free_all_blocks()
+        gc.collect()
 
     def get_cluster_coeff(self):
 
-        return self.EOMO, self.LOMO
+        return self.EOMO
 
     def kernel(self):
 
@@ -309,14 +387,22 @@ class GPU_CCSDSolver():
         self.eri_general = pyscf.lib.pack_tril(self.eri_general)
         mf_frag.with_df._cderi = self.eri_general
 
-        self.cc_fragment = cucc.CCSD(mf_frag)
+        gpulim = cupy.cuda.Device().mem_info[1]
+        gpulim = int(gpulim * CC_MEM_RATIO)
+        self.cc_fragment = cucc.CCSD(mf_frag, gpulim=gpulim)
         self.eris = _make_df_eris(
             self.cc_fragment,
             self.projector,
             mf_frag.mo_coeff)
         self.eris.e_hf = 0
+        if self.ewald_correct:
+            from pyscf.pbc.cc.ccsd import _adjust_occ
+            self.eris.mo_energy = _adjust_occ(self.eris.mo_energy, self.nocc, -self.madelung)
 
         self.eri_general = self.cc_fragment.with_df._cderi = None
+
+        lib.free_all_blocks()
+        gc.collect()
 
         self.cc_fragment.verbose = 4
         self.cc_fragment.conv_tol = 1e-8
@@ -331,16 +417,16 @@ class GPU_CCSDSolver():
         assert self.cc_fragment.converged
 
     def get_coeff(self, LOBNO, cluster_list, low_level_info):
-        LOEO = LOBNO[:, cluster_list]
+        LOEO = cupy.asarray(LOBNO[:, cluster_list])
         Fock_clu = cupy.einsum(
             'ip, jq, ij -> pq',
-            cupy.asarray(LOEO),
-            cupy.asarray(LOEO),
+            LOEO,
+            LOEO,
             cupy.asarray(low_level_info.fock_LO))
         orb_energy, EOMO = cupy.linalg.eigh(Fock_clu)
         EOMO = fix_orbital_sign(EOMO)
         LOMO = cupy.dot(LOEO, EOMO)
-        AOMO = cupy.dot(low_level_info.AOLO, LOMO)
+        AOMO = cupy.dot(cupy.asarray(low_level_info.AOLO), LOMO)
 
         return LOEO, orb_energy, EOMO, LOMO, AOMO
 
@@ -391,7 +477,6 @@ class GPU_CCSDSolver():
             self.l1 = self.l1.asnumpy()
             self.l2 = self.l2.asnumpy()
 
-        self.mo_energy = self.eris.mo_energy
         self.fock = self.eris.fock
 
         lib.free_all_blocks()
@@ -442,10 +527,19 @@ class GPU_CCSDSolver():
             self.eri_general = pyscf.lib.pack_tril(self.eri_general)
             mf_frag.with_df._cderi = self.eri_general
 
-            self.cc_fragment = cucc.CCSD(mf_frag)
+            gpulim = cupy.cuda.Device().mem_info[1]
+            gpulim = int(gpulim * CC_MEM_RATIO)
+            self.cc_fragment = cucc.CCSD(mf_frag, gpulim=gpulim)
             self.cc_fragment.stdout = self.Logger
             self.eris = _make_df_eris(
                 self.cc_fragment, self.projector, mf_frag.mo_coeff)
+            self.eris.Loo = self.eris.Loo.asnumpy()
+            self.eris.Lov = self.eris.Lov.asnumpy()
+            self.eris.Lvv = self.eris.Lvv.asnumpy()
+            self.eris.e_hf = 0
+            if self.ewald_correct:
+                from pyscf.pbc.cc.ccsd import _adjust_occ
+                self.eris.mo_energy = _adjust_occ(self.eris.mo_energy, self.nocc, -self.madelung)
             self.eri_general = self.cluster_oei = None
             self.pool = self.cc_fragment.pool
             lib.free_all_blocks()
@@ -465,18 +559,26 @@ class GPU_CCSDSolver():
             file.close()
             self.t2 = self.pool.new(
                 't2', (self.nocc, self.nocc, self.nvir, self.nvir), dtype='f8')
+            self.t2 = self.t2.ascupy()
             self.t2.set(t2_h)
             cupy.cuda.get_current_stream().synchronize()
             t2_h = None
 
         if not hasattr(self, 't1'):
             self.t1 = self.pool.new('t1', (self.nocc, self.nvir), dtype='f8')
+            self.t1 = self.t1.ascupy()
             t1_h = cupyx.empty_pinned((self.nocc, self.nvir), dtype='f8')
             with h5py.File(os.path.join(t1t2_path, 't1'), 'r') as f:
                 t1_h[:] = f['t1'][:]
             self.t1.set(t1_h)
             cupy.cuda.get_current_stream().synchronize()
             t1_h = None
+
+        if self.t2.dev != 0:
+            self.Logger.info(
+                't2 in CPU memory. Transport t2 from CPU to GPU!'
+            )
+            self.t2 = self.t2.ascupy()
 
         self.cc_fragment.verbose = 7
         projector = cupy.asarray(self.projector)
@@ -531,7 +633,7 @@ class GPU_CCSDSolver():
                 beta=1.0,
                 alpha=0.5)
 
-        self.l2c = None
+        self.l2c = arr = None
 
         lib.free_all_blocks()
 
@@ -577,7 +679,7 @@ class GPU_CCSDSolver():
                 'ijkl',
                 arr,
                 alpha=0.5)
-        tau = None
+        tau = arr = None
         lib.free_all_blocks()
         gc.collect()
 
@@ -669,9 +771,13 @@ class GPU_CCSDSolver():
         self.pvOOv = self.pool.new('pvOOv', (nv, no, no, nv), 'f8', pin=1)
         self.pvOOv[:] = 0
         with self.pvOOv as arr_pvOOv:
-            free_size = self.pool.free_memory / 8
+            free_size = lib.gpu_avail_bytes() / 8
             slice_len = min(no, int(free_size / (2 * no * nv * nv)))
-            # slice_len = 2
+            if slice_len < 1:
+                lib.free_all_blocks()
+                self.Logger.info('slice_len is smaller than 1, set to 1. Now GPU memory usage is {} MB'.format(lib.gpu_avail_bytes(1.0) / 1024 / 1024))
+                slice_len = 1
+
             slice_o = [slice(i[0], i[1]) for i in prange(0, no, slice_len)]
             for so in slice_o:
                 with self.l2x[so] as arr_l2:
@@ -698,6 +804,10 @@ class GPU_CCSDSolver():
                 self.mvv,
                 alpha=2.0)
 
+        arr_pvOOv = arr_l2 = arr_t2 = None
+        lib.free_all_blocks()
+        gc.collect()
+
         with self.t2 as arr:
             self.mia = self.pool.new('mia', (no, nv), 'f8', pin=0)
             culib.contraction(
@@ -720,6 +830,7 @@ class GPU_CCSDSolver():
 
         self.mab = self.pool.new('mab', (nv, nv), 'f8', pin=0)
         culib.contraction('kc', self.l1x, 'kb', self.t1, 'cb', self.mab)
+        arr = None
 
         lib.free_all_blocks()
         gc.collect()
@@ -727,9 +838,15 @@ class GPU_CCSDSolver():
         self.pvoOV = self.pool.new('pvOOv', (nv, no, no, nv), 'f8', pin=1)
         self.pvoOV[:] = 0
         with self.pvoOV as arr_pvoOV:
-            free_size = self.pool.free_memory / 8
+            free_size = lib.gpu_avail_bytes() / 8
             slice_len = min(no, int(free_size / (2 * no * nv * nv)))
-            # slice_len = 2
+            if slice_len == 0:
+                self.Logger.info('slice_len is 0, may cause out of memory error.')
+            if slice_len < 1:
+                lib.free_all_blocks()
+                self.Logger.info('slice_len is smaller than 1, set to 1. Now GPU memory usage is {} MB'.format(lib.gpu_avail_bytes(1.0) / 1024 / 1024))
+                slice_len = 1
+
             slice_o = [slice(i[0], i[1]) for i in prange(0, no, slice_len)]
             for so in slice_o:
                 with self.l2x[so] as arr_l2:
@@ -762,6 +879,9 @@ class GPU_CCSDSolver():
                             beta=1.0,
                             alpha=-1.0)
 
+            arr_l2 = arr_t2 = None
+            lib.free_all_blocks()
+
             culib.contraction(
                 'aljb',
                 arr_pvoOV,
@@ -778,6 +898,9 @@ class GPU_CCSDSolver():
                 'db',
                 self.mvv,
                 beta=1.0)
+
+        arr_pvoOV = None
+        lib.free_all_blocks()
 
         self.mij = self.pool.new('mij', (no, no), 'f8', pin=0)
         self.mij[:] = self.moo
@@ -815,7 +938,7 @@ class GPU_CCSDSolver():
                 e_oooo += cupy.dot(gooL_tmp.ravel(), arr_Loo.ravel().T)
                 e_oooo *= 4
 
-        buffer_Loo = gooL_tmp = None
+        buffer_Loo = gooL_tmp = arr_goooo = arr_Loo = None
         lib.free_all_blocks()
         gc.collect()
 
@@ -840,9 +963,10 @@ class GPU_CCSDSolver():
                 beta=1.0,
                 alpha=2.0)
 
+        arr_goooo = None
         lib.free_all_blocks()
 
-        free_size = self.pool.free_memory / 8
+        free_size = lib.gpu_avail_bytes() / 8
         slice_len = min(nv, int(free_size / (no * no * nv)))
         # slice_len = 2
         slice_v = [slice(i[0], i[1]) for i in prange(0, nv, slice_len)]
@@ -872,7 +996,7 @@ class GPU_CCSDSolver():
         arr_pvOOv = arr_pvoOV = t1_tmp = buffer_voov = None
         lib.free_all_blocks()
 
-        free_size = self.pool.free_memory / 8
+        free_size = lib.gpu_avail_bytes() / 8
         slice_len = min(no, int(free_size / (no * nv * nv)))
         # slice_len = 2
         slice_o = [slice(i[0], i[1]) for i in prange(0, no, slice_len)]
@@ -932,10 +1056,13 @@ class GPU_CCSDSolver():
                 beta=1.0,
                 alpha=-1.0)
 
+        Lov = None
+        lib.free_all_blocks()
+
         with self.eris.Loo as Loo:
             e_ooov += cupy.dot(Loo.ravel(), gooL_tmp.ravel().T)
 
-        gooL_tmp = buffer_Loo = gooov = None
+        gooL_tmp = buffer_Loo = gooov = Loo = None
 
         return e_ooov.item() * 4
 
@@ -955,6 +1082,8 @@ class GPU_CCSDSolver():
                 'ijab',
                 arr,
                 beta=1.0)
+        arr = None
+        lib.free_all_blocks()
 
         buffer_oovv = self.pool.empty((no, no, nv, nv), 'f8')
         tau = self.t2.ascupy(buf=buffer_oovv)
@@ -963,7 +1092,7 @@ class GPU_CCSDSolver():
         tau *= 0.5
 
         with self.goooo as arr_goooo:
-            free_size = self.pool.free_memory / 8
+            free_size = lib.gpu_avail_bytes() / 8
             slice_len = min(no, int(free_size / (no * nv * nv)))
             # slice_len = 2
             slice_o = [slice(i[0], i[1]) for i in prange(0, no, slice_len)]
@@ -998,9 +1127,9 @@ class GPU_CCSDSolver():
                         alpha=-1.0)
                     arr_goovv += tau[so]
 
-        self.goooo = None
+        self.goooo = arr_goooo = arr_goovv = None
 
-        free_size = self.pool.free_memory / 8
+        free_size = lib.gpu_avail_bytes() / 8
         slice_len = min(no, int(free_size / (no * nv * nv * 2)))
         # slice_len = 2
         slice_o = [slice(i[0], i[1]) for i in prange(0, no, slice_len)]
@@ -1047,6 +1176,9 @@ class GPU_CCSDSolver():
                     arr_goovv,
                     beta=1.0)
 
+            arr_goovv = None
+            lib.free_all_blocks()
+
         for so in slice_o:
             with goovv[so] as arr_goovv:
                 tau = self.t2[so].ascupy(buf=buffer_tau)
@@ -1078,6 +1210,9 @@ class GPU_CCSDSolver():
                     beta=1.0,
                     alpha=-1.0)
 
+            arr_goovv = None
+            lib.free_all_blocks()
+
         tau = buffer_tau = None
         lib.free_all_blocks()
 
@@ -1107,6 +1242,9 @@ class GPU_CCSDSolver():
                 alpha=-1.0)
             e_ovov += cupy.dot(g_tmp.ravel(), Lov.ravel().T)
 
+        Lov = None
+        lib.free_all_blocks()
+
         goovv = g_tmp = buffer_oovv = None
         lib.free_all_blocks()
 
@@ -1116,14 +1254,18 @@ class GPU_CCSDSolver():
 
         no, nv = self.t1.shape
         nL = self.eris.naux
-        e_ovvo = 0
-        e_oovv = 0
+        e_ovvo = cupy.asarray([0.0])
+        e_oovv = cupy.asarray([0.0])
 
         gvOOv = self.pool.new('gvOOv', (nv, no, no, nv), dtype='f8', pin=0)
         gvOOv[:] = 0
 
-        free_size = self.pool.free_memory / 8
+        free_size = lib.gpu_avail_bytes() / 8
         slice_len = min(no, int(free_size / (no * nv * nv * 2)))
+        if slice_len < 1:
+            lib.free_all_blocks()
+            self.Logger.info('slice_len is smaller than 1, set to 1. Now GPU memory usage is {} MB'.format(lib.gpu_avail_bytes(1.0) / 1024 / 1024))
+            slice_len = 1
         # slice_len = 2
         slice_o = [slice(i[0], i[1]) for i in prange(0, no, slice_len)]
 
@@ -1149,7 +1291,7 @@ class GPU_CCSDSolver():
         buffer_tmp = buffer_tmp2 = tmp = l2tmp = None
         lib.free_all_blocks()
 
-        free_size = self.pool.free_memory / 8
+        free_size = lib.gpu_avail_bytes() / 8
         slice_len = min(nv, int(free_size / (no * no * nv)))
         # slice_len = 2
         slice_v = [slice(i[0], i[1]) for i in prange(0, nv, slice_len)]
@@ -1161,26 +1303,36 @@ class GPU_CCSDSolver():
         tmp = buffer_tmp = None
         lib.free_all_blocks()
 
-        buffer_g_tmp = self.pool.empty((nL, no, max(nv, no)), dtype='f8')
-        with self.eris.Lov as Lov:
-            g_tmp = culib.contraction(
-                'aijb', gvOOv, 'Lia', Lov, 'Ljb', buf=buffer_g_tmp)
-            e_ovvo += cupy.dot(g_tmp.ravel(), Lov.ravel().T).item()
-        with self.eris.Lvv as Lvv:
-            g_tmp = culib.contraction(
-                'aijb', gvOOv, 'Lba', Lvv, 'Lij', buf=buffer_g_tmp)
-        gvOOv = None
-        lib.free_all_blocks()
-        with self.eris.Loo as Loo:
-            e_oovv -= cupy.dot(g_tmp.ravel(), Loo.ravel().T) * 2
+        free_size = lib.gpu_avail_bytes() / 8
+        slice_len = max(1, min(nL, int(free_size / ((no + nv) * max(nv, no)))))
+        slice_L = [slice(i[0], i[1]) for i in prange(0, nL, slice_len)]
+        buffer_g_tmp = self.pool.empty((slice_len, no, max(nv, no)), dtype='f8')
+        for sL in slice_L:
+            with self.eris.Lov[sL] as Lov:
+                g_tmp = culib.contraction(
+                    'aijb', gvOOv, 'Lia', Lov, 'Ljb', buf=buffer_g_tmp)
+                e_ovvo += cupy.dot(g_tmp.ravel(), Lov.ravel().T).item()
+            Lov = None
+            lib.free_all_blocks()
 
-        buffer_g_tmp = g_tmp = None
+            with self.eris.Lvv[sL] as Lvv:
+                g_tmp = culib.contraction(
+                    'aijb', gvOOv, 'Lba', Lvv, 'Lij', buf=buffer_g_tmp)
+            Lvv = None
+            lib.free_all_blocks()
+
+            with self.eris.Loo[sL] as Loo:
+                e_oovv -= cupy.dot(g_tmp.ravel(), Loo.ravel().T) * 2
+            Loo = None
+            lib.free_all_blocks()
+
+        buffer_g_tmp = g_tmp = gvOOv = None
         lib.free_all_blocks()
 
         gvoOV = self.pool.new('gvoOV', (nv, no, no, nv), dtype='f8')
         culib.contraction('ia', self.l1x, 'jb', self.t1, 'aijb', gvoOV)
 
-        free_size = self.pool.free_memory / 8
+        free_size = lib.gpu_avail_bytes() / 8
         slice_len = min(no, int(free_size / (no * nv * nv * 2)))
         # slice_len = 2
         slice_o = [slice(i[0], i[1]) for i in prange(0, no, slice_len)]
@@ -1209,7 +1361,7 @@ class GPU_CCSDSolver():
 
         buffer_tmp = buffer_tmp2 = tmp = l2tmp = None
 
-        free_size = self.pool.free_memory / 8
+        free_size = lib.gpu_avail_bytes() / 8
         slice_len = min(nv, int(free_size / (no * no * nv)))
         # slice_len = 2
         slice_v = [slice(i[0], i[1]) for i in prange(0, nv, slice_len)]
@@ -1221,18 +1373,32 @@ class GPU_CCSDSolver():
         tmp = buffer_tmp = None
         lib.free_all_blocks()
 
-        buffer_g_tmp = self.pool.empty((nL, no, max(nv, no)), dtype='f8')
-        with self.eris.Lov as Lov:
-            g_tmp = culib.contraction(
-                'aijb', gvoOV, 'Lia', Lov, 'Ljb', buf=buffer_g_tmp)
-            e_ovvo += 2 * cupy.dot(g_tmp.ravel(), Lov.ravel().T)
-        with self.eris.Lvv as Lvv:
-            g_tmp = culib.contraction(
-                'aijb', gvoOV, 'Lba', Lvv, 'Lij', buf=buffer_g_tmp)
-        with self.eris.Loo as Loo:
-            e_oovv -= cupy.dot(g_tmp.ravel(), Loo.ravel().T)
+
+        free_size = lib.gpu_avail_bytes() / 8
+        slice_len = max(1, min(nL, int(free_size / ((no + nv) * max(nv, no)))))
+        slice_L = [slice(i[0], i[1]) for i in prange(0, nL, slice_len)]
+        buffer_g_tmp = self.pool.empty((slice_len, no, max(nv, no)), dtype='f8')
+        for sL in slice_L:
+            with self.eris.Lov[sL] as Lov:
+                g_tmp = culib.contraction(
+                    'aijb', gvoOV, 'Lia', Lov, 'Ljb', buf=buffer_g_tmp)
+                e_ovvo += 2 * cupy.dot(g_tmp.ravel(), Lov.ravel().T).item()
+            Lov = None
+            lib.free_all_blocks()
+
+            with self.eris.Lvv[sL] as Lvv:
+                g_tmp = culib.contraction(
+                    'aijb', gvoOV, 'Lba', Lvv, 'Lij', buf=buffer_g_tmp)
+            Lvv = None
+            lib.free_all_blocks()
+
+            with self.eris.Loo[sL] as Loo:
+                e_oovv -= cupy.dot(g_tmp.ravel(), Loo.ravel().T)
+            Loo = None
+            lib.free_all_blocks()
 
         gvoOV = buffer_g_tmp = g_tmp = None
+        lib.free_all_blocks()
 
         return e_ovvo.item() * 4, e_oovv.item() * 4
 
@@ -1242,15 +1408,20 @@ class GPU_CCSDSolver():
         nL = self.eris.naux
         e_vvvv_ovvv = 0
         lib.free_all_blocks()
-        free_size = self.pool.free_memory / 8
-        free_size_tmp = self.pool.free_memory / 8 - \
+        free_size = lib.gpu_avail_bytes() / 8
+        free_size_tmp = lib.gpu_avail_bytes() / 8 - \
             max(self.t2.size, self.eris.Lvv.size, self.eris.Lov.size)
         slice_len1 = free_size_tmp / \
             (nL * nv + nv ** 2 * max(no, nv) + nv * no ** 2)
         slice_len2 = free_size / \
             (nL * no + no ** 2 * max(nv, no) + 2 * no * nv ** 2)
         slice_len = min(int(slice_len1), int(slice_len2))
-        slice_len = min(slice_len, nv)
+        slice_len = min(slice_len, nv, 8)
+        if slice_len < 1:
+            lib.free_all_blocks()
+            self.Logger.info('slice_len is smaller than 1, set to 1. Now GPU memory usage is {} MB'.format(lib.gpu_avail_bytes(1.0) / 1024 / 1024))
+            slice_len = 1
+
         # slice_len = 2
         assert slice_len > 0
         slice_v = [slice(i[0], i[1]) for i in prange(0, nv, slice_len)]

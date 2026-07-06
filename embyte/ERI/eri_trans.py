@@ -32,6 +32,41 @@ import cupy
 cupy.cuda.set_pinned_memory_allocator(None)
 
 
+def _normalize_kpts(kpts):
+    if kpts is None:
+        return None
+    if hasattr(kpts, 'kpts'):
+        kpts = kpts.kpts
+    kpts = numpy.asarray(kpts, dtype=float)
+    if kpts.ndim != 2 or kpts.shape[1] != 3:
+        raise ValueError(f'Invalid kpts shape {kpts.shape}, expected (nkpts, 3)')
+    return kpts
+
+
+def _dispatch_periodic_backend(name, mol, auxmol, args, kpts=None, **kwargs):
+    kpts = _normalize_kpts(kpts)
+    try:
+        is_gamma = (kpts is None)
+        if kpts is not None and len(kpts) == 1:
+            is_gamma = numpy.allclose(kpts[0], 0.0)
+            if not is_gamma:
+                raise NotImplementedError(
+                    "Single k-point (nkpts=1) with non-gamma kpt is not supported by the gamma backend. "
+                    "Provide a Monkhorst-Pack mesh (nkpts>1) or use an implementation that supports non-gamma single k-point. "
+                    f"Got kpt={kpts[0]!r}."
+                )
+
+        if is_gamma:
+            from byteqc.embyte.ERI import eri_trans_gpu4pyscf as eri_trans_g
+            return getattr(eri_trans_g, name)(mol, auxmol, *args, **kwargs)
+        from byteqc.embyte.ERI import eri_trans_pbc_gpu4pyscf as eri_trans_k
+    except ImportError as e:
+        raise ImportError(
+            "Please install gpu4pyscf to use the periodic ERI transformation paths."
+        ) from e
+    return getattr(eri_trans_k, name)(mol, auxmol, *args, kpts=kpts, **kwargs)
+
+
 def generate_tmpfile_name():
     unique_name = str(uuid.uuid4())
     return unique_name
@@ -65,12 +100,23 @@ def get_j2c(logger, mol=None, auxmol=None, vhfopt3c=None,
 
 
 def eri_OVL_SIE_MP2(mol, auxmol, mo_coeff_occ1, mo_coeff_unocc1,
-                    mo_coeff_occ2, mo_coeff_unocc2, j2c, logger, vhfopt=None):
+                    mo_coeff_occ2, mo_coeff_unocc2, j2c, logger, vhfopt=None,
+                    kpts=None, **kwargs):
     '''
     On-the-flying calculate 2 cderis in shape of (nocc1, nvir1, naux)
     and (nvir2, nocc2, naux) corresponding to mo_coeff 1 and 2.
     The cderis are used in MP2 to generate BNOs.
     '''
+
+    if getattr(mol, 'pbc_intor', None) is not None:
+        return _dispatch_periodic_backend(
+            'eri_OVL_SIE_MP2',
+            mol,
+            auxmol,
+            (mo_coeff_occ1, mo_coeff_unocc1, mo_coeff_occ2, mo_coeff_unocc2, j2c, logger),
+            kpts=kpts,
+            **kwargs,
+        )
 
     mo_coeff_occ1 = cupy.asarray(mo_coeff_occ1)
     mo_coeff_occ2 = cupy.asarray(mo_coeff_occ2)
@@ -368,7 +414,7 @@ def eri_ondisk_OVL_SIE_MP2(mol, cderi_AO_file, mo_coeff_occ1,
     nocc2 = mo_coeff_occ2.shape[1]
     nvir2 = mo_coeff_unocc2.shape[1]
 
-    free_size = lib.gpu_avail_bytes() / 8
+    free_size = lib.gpu_avail_bytes(0.35) / 8
 
     nmo_pair = int(nmo * (nmo - 1) / 2 + nmo)
 
@@ -456,9 +502,21 @@ def eri_ondisk_OVL_SIE_MP2(mol, cderi_AO_file, mo_coeff_occ1,
                 process_r_cderi.append(process)
 
             for p in process_r_cderi:
+                tmp_con_a = cupy.random.rand(1000, 1000)
+                tmp_con_b = cupy.random.rand(1000, 1000)
+                tmp_con_out = cupy.empty_like(tmp_con_a)
+                while not p.ready():
+                    lib.gemm(tmp_con_a, tmp_con_b, c=tmp_con_out)
+                tmp_con_a = tmp_con_b = tmp_con_out = None
                 p.get()
         else:
             for p in process_r_cderi:
+                tmp_con_a = cupy.random.rand(1000, 1000)
+                tmp_con_b = cupy.random.rand(1000, 1000)
+                tmp_con_out = cupy.empty_like(tmp_con_a)
+                while not p.ready():
+                    lib.gemm(tmp_con_a, tmp_con_b, c=tmp_con_out)
+                tmp_con_a = tmp_con_b = tmp_con_out = None
                 p.get()
 
             cderi = cderi_next
@@ -591,10 +649,23 @@ def read_async_PBC(j3c_type, filepath, sv, x_pointer, buf_tmp_pointer,
 
 
 def eri_high_level_solver_incore(mol, auxmol, mo_coeff_occ, mo_coeff_unocc,
-                                 j2c, logger, solver_type='MP2', vhfopt=None, svd_tol=1e-4):
+                                 j2c, logger, solver_type='MP2', vhfopt=None,
+                                 svd_tol=1e-4, kpts=None, **kwargs):
     '''
     On-the-flying generate cderi for cluster which is under high-level solver processing.
     '''
+    if getattr(mol, 'pbc_intor', None) is not None:
+        return _dispatch_periodic_backend(
+            'eri_high_level_solver_incore',
+            mol,
+            auxmol,
+            (mo_coeff_occ, mo_coeff_unocc, j2c, logger),
+            kpts=kpts,
+            solver_type=solver_type,
+            svd_tol=svd_tol,
+            **kwargs,
+        )
+
     mo_coeff_occ = cupy.asarray(mo_coeff_occ)
     mo_coeff_unocc = cupy.asarray(mo_coeff_unocc)
     nocc = mo_coeff_occ.shape[1]
@@ -964,9 +1035,21 @@ def eri_ondisk_high_level_solver_incore(
                 process_r_cderi.append(process)
 
             for p in process_r_cderi:
+                tmp_con_a = cupy.random.rand(1000, 1000)
+                tmp_con_b = cupy.random.rand(1000, 1000)
+                tmp_con_out = cupy.empty_like(tmp_con_a)
+                while not p.ready():
+                    lib.gemm(tmp_con_a, tmp_con_b, c=tmp_con_out)
+                tmp_con_a = tmp_con_b = tmp_con_out = None
                 p.get()
         else:
             for p in process_r_cderi:
+                tmp_con_a = cupy.random.rand(1000, 1000)
+                tmp_con_b = cupy.random.rand(1000, 1000)
+                tmp_con_out = cupy.empty_like(tmp_con_a)
+                while not p.ready():
+                    lib.gemm(tmp_con_a, tmp_con_b, c=tmp_con_out)
+                tmp_con_a = tmp_con_b = tmp_con_out = None
                 p.get()
 
             cderi = cderi_next
@@ -1133,10 +1216,22 @@ def eri_ondisk_high_level_solver_incore(
 
 
 def eri_high_level_solver_incore_with_jk(
-        mol, auxmol, mo_coeff, j2c, logger, rdm1_core_coeff, vhfopt=None, svd_tol=1e-4):
+        mol, auxmol, mo_coeff, j2c, logger, rdm1_core_coeff, vhfopt=None,
+        svd_tol=1e-4, kpts=None, **kwargs):
     '''
     On-the-flying generate the cderi for CCSD, and obtain j and k at the meantime.
     '''
+    if getattr(mol, 'pbc_intor', None) is not None:
+        return _dispatch_periodic_backend(
+            'eri_high_level_solver_incore_with_jk',
+            mol,
+            auxmol,
+            (mo_coeff, j2c, logger, rdm1_core_coeff),
+            kpts=kpts,
+            svd_tol=svd_tol,
+            **kwargs,
+        )
+
     mo_coeff = cupy.asarray(mo_coeff)
     nmo = mo_coeff.shape[1]
     rdm1_core_coeff = cupy.asarray(rdm1_core_coeff)
@@ -1404,6 +1499,7 @@ def eri_high_level_solver_incore_with_jk(
         sij_eri_vk_d = lib.empty_from_buf(
             buff_eri_d, (ni * nmo, naux_cart), 'f8')
         sij_eri_vk_d.set(sij_eri_vk_h)
+        cupy.cuda.get_current_stream().synchronize()
 
         if si_ind + 1 < len(si_list):
             si_next = si_list[si_ind + 1]
@@ -1473,6 +1569,7 @@ def eri_high_level_solver_incore_with_jk(
 
         sij_unL_d = lib.empty_from_buf(buff_eri_d, (ni * nmo, naux_cart), 'f8')
         sij_unL_d.set(sij_unL_h)
+        cupy.cuda.get_current_stream().synchronize()
 
         if si_ind + 1 < len(si_list):
             si_next = si_list[si_ind + 1]
@@ -1491,7 +1588,7 @@ def eri_high_level_solver_incore_with_jk(
             transb='N')
         solve_triangular(j2c, sij_L_d.T, lower=True, overwrite_b=True,)
         sij = slice(si.start * nmo, si.stop * nmo)
-        sij_L_d.get(out=ijL[sij])
+        sij_L_d.get(out=ijL[sij], blocking=True)
         lib.contraction('iL', sij_L_d, 'L', eri_vj, 'i', vj_d[sij], beta=1.0)
         lib.gemm(sij_L_d, sij_L_d, LL_svd, transa='T', transb='N', beta=1.0)
         cupy.cuda.get_current_stream().synchronize()
@@ -1691,9 +1788,21 @@ def eri_ondisk_high_level_solver_incore_with_jk(
                 process_r_cderi.append(process)
 
             for p in process_r_cderi:
+                tmp_con_a = cupy.random.rand(1000, 1000)
+                tmp_con_b = cupy.random.rand(1000, 1000)
+                tmp_con_out = cupy.empty_like(tmp_con_a)
+                while not p.ready():
+                    lib.gemm(tmp_con_a, tmp_con_b, c=tmp_con_out)
+                tmp_con_a = tmp_con_b = tmp_con_out = None
                 p.get()
         else:
             for p in process_r_cderi:
+                tmp_con_a = cupy.random.rand(1000, 1000)
+                tmp_con_b = cupy.random.rand(1000, 1000)
+                tmp_con_out = cupy.empty_like(tmp_con_a)
+                while not p.ready():
+                    lib.gemm(tmp_con_a, tmp_con_b, c=tmp_con_out)
+                tmp_con_a = tmp_con_b = tmp_con_out = None
                 p.get()
 
             cderi = cderi_next

@@ -24,8 +24,9 @@ def from_atom_to_orb_iao(mol, atom_list_frag, minao='minao'):
     '''
     Exchange the atom fragment list to the IAO fragemnt list.
     '''
-    refer_mol = gto.Mole()
-    refer_mol.atom = mol.atom
+    # refer_mol = gto.Mole()
+    # refer_mol.atom = mol.atom
+    refer_mol = mol.copy()
     refer_mol.basis = minao
     refer_mol.build()
 
